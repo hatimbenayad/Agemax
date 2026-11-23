@@ -35,6 +35,17 @@ fn test_vt_terminal_grid_ansi_processing() {
 }
 
 #[test]
+fn test_detect_git_branch_in_current_repo() {
+    let cwd = std::env::current_dir().unwrap();
+    let branch = agemax_term::metadata::detect_git_branch(&cwd);
+    println!("Detected branch in workspace: {:?}", branch);
+    assert!(
+        branch.is_some(),
+        "Expected to detect git branch in current workspace"
+    );
+}
+
+#[test]
 fn test_coalescer_batching() {
     let (mut coalescer, rx) = PtyCoalescer::new(Duration::from_millis(10));
     coalescer.push_bytes(b"chunk1 ");
