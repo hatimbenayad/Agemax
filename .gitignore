@@ -1,0 +1,15 @@
+target/
+**/target/
+**/*.rs.bk
+*.pdb
+*.exe
+.DS_Store
+Thumbs.db
+
+# Developer / Spike test runs
+spikes/s1_profile_*
+local_test/
+*.tmp
+temp/
+.vscode/
+.idea/

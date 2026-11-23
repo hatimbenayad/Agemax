@@ -1,0 +1,14 @@
+[package]
+name = "agemax-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agemax-core = { path = "../agemax-core" }
+toml.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+directories.workspace = true
+notify.workspace = true
+tracing.workspace = true

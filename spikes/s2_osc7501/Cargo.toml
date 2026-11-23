@@ -1,0 +1,9 @@
+[package]
+name = "spike-s2-conpty"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+portable-pty = "0.8"
