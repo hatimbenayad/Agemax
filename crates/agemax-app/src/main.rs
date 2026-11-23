@@ -1,3 +1,4 @@
+mod command_palette;
 mod ipc_bridge;
 mod notification_win;
 mod sidebar;
@@ -5,6 +6,8 @@ mod tab_bar;
 
 use agemax_agy::osc::{AgentOscEvent, OscParser};
 use agemax_agy::profile::ProfileManager;
+use agemax_config::hot_reload::ConfigWatcher;
+use agemax_config::schema::AgeMaxConfig;
 use agemax_core::layout::{Direction, PaneId, SplitDirection, WorkspaceId};
 use agemax_core::model::{Point, Rect as CoreRect, TerminalSize};
 use agemax_core::notification::NotificationStore;
@@ -16,6 +19,7 @@ use agemax_core::workspace::{Tab, Workspace};
 use agemax_term::metadata::detect_git_branch;
 use agemax_term::pty::{detect_default_shell, PtyConfig};
 use agemax_term::surface::TerminalSurface;
+use command_palette::{CommandPalette, PaletteAction};
 use eframe::egui::{self, Color32, FontId, Key, Pos2, Rect, Stroke, StrokeKind, Vec2};
 use ipc_bridge::{start_ipc_server, IpcAppCommand};
 use notification_win::{NotificationService, PlatformNotificationService};
@@ -71,6 +75,9 @@ pub struct AgeMaxApp {
     notification_store: NotificationStore,
     notification_service: Box<dyn NotificationService>,
     ipc_rx: crossbeam_channel::Receiver<IpcAppCommand>,
+    config: AgeMaxConfig,
+    config_watcher: Option<ConfigWatcher>,
+    command_palette: CommandPalette,
     show_notifications_panel: bool,
     is_sidebar_collapsed: bool,
     font_size: f32,
@@ -113,6 +120,13 @@ impl AgeMaxApp {
             start_ipc_server(ipc_tx, ctx_container.egui_ctx.clone());
         }
 
+        let mut config = AgeMaxConfig::load_or_create_default();
+        config.merge_workspace_config(&cwd);
+
+        let config_watcher = ConfigWatcher::watch(AgeMaxConfig::default_path()).ok();
+        let mut command_palette = CommandPalette::new();
+        command_palette.set_custom_commands(&config.commands);
+
         Self {
             workspaces: vec![initial_workspace],
             active_workspace_index: 0,
@@ -123,6 +137,9 @@ impl AgeMaxApp {
             notification_store: NotificationStore::new(),
             notification_service: Box::new(PlatformNotificationService::new()),
             ipc_rx,
+            config,
+            config_watcher,
+            command_palette,
             show_notifications_panel: false,
             is_sidebar_collapsed: false,
             font_size: 14.0,
@@ -202,6 +219,68 @@ impl AgeMaxApp {
         let snapshot = SessionSnapshot::new(self.active_workspace_index, ws_snapshots);
         let path = SessionSnapshot::default_path();
         let _ = snapshot.save_to_file(&path);
+    }
+
+    pub fn execute_palette_action(&mut self, action: PaletteAction) {
+        match action {
+            PaletteAction::SplitRight => self.split_active_pane(SplitDirection::Horizontal),
+            PaletteAction::SplitDown => self.split_active_pane(SplitDirection::Vertical),
+            PaletteAction::ClosePane => self.close_active_pane(),
+            PaletteAction::ToggleZoom => {
+                if let Some(ws) = self.active_workspace_mut() {
+                    if let Some(tab) = ws.active_tab_mut() {
+                        tab.toggle_zoom();
+                    }
+                }
+            }
+            PaletteAction::ToggleSidebar => {
+                self.is_sidebar_collapsed = !self.is_sidebar_collapsed;
+            }
+            PaletteAction::JumpUnread => {
+                if let Some((ws_id, pane_id)) = self.notification_store.oldest_unread_pane() {
+                    if let Some(idx) = self.workspaces.iter().position(|w| w.id == ws_id) {
+                        self.active_workspace_index = idx;
+                        if let Some(ws) = self.workspaces.get_mut(idx) {
+                            if let Some(tab) = ws.active_tab_mut() {
+                                tab.active_pane = pane_id;
+                            }
+                        }
+                        self.notification_store.mark_pane_read(pane_id);
+                    }
+                }
+            }
+            PaletteAction::ToggleNotifications => {
+                self.show_notifications_panel = !self.show_notifications_panel;
+            }
+            PaletteAction::NewWorkspace => {
+                let pane_id = PaneId::new();
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let git_branch = detect_git_branch(&cwd);
+                let mut ws = Workspace::new(
+                    format!("Workspace {}", self.workspaces.len() + 1),
+                    cwd.clone(),
+                    pane_id,
+                );
+                ws.git_branch = git_branch;
+                if let Ok(surface) = spawn_terminal_surface(TerminalSize::new(80, 24), &cwd) {
+                    self.surfaces.insert(pane_id, surface);
+                    self.osc_parsers.insert(pane_id, OscParser::new());
+                    self.pane_status.insert(pane_id, AgentStatus::Idle);
+                    self.workspaces.push(ws);
+                    self.active_workspace_index = self.workspaces.len() - 1;
+                    self.save_session();
+                }
+            }
+            PaletteAction::Custom(cmd) => {
+                let target = self.active_pane_id();
+                if let Some(id) = target {
+                    if let Some(surface) = self.surfaces.get_mut(&id) {
+                        let text = format!("{}\r", cmd.command);
+                        let _ = surface.send_input(text.as_bytes());
+                    }
+                }
+            }
+        }
     }
 
     pub fn split_active_pane(&mut self, direction: SplitDirection) {
@@ -525,6 +604,10 @@ impl AgeMaxApp {
 
                     if modifiers.ctrl && modifiers.shift {
                         match key {
+                            Key::P => {
+                                self.command_palette.open();
+                                continue;
+                            }
                             Key::D => {
                                 self.split_active_pane(SplitDirection::Horizontal);
                                 continue;
@@ -747,12 +830,20 @@ impl eframe::App for AgeMaxApp {
             self.first_frame_rendered = true;
         }
 
-        // 1. Process pending IPC commands
+        // 1. Check for configuration hot reload
+        if let Some(watcher) = &self.config_watcher {
+            if let Some(new_cfg) = watcher.try_recv() {
+                self.command_palette.set_custom_commands(&new_cfg.commands);
+                self.config = new_cfg;
+            }
+        }
+
+        // 2. Process pending IPC commands
         while let Ok(cmd) = self.ipc_rx.try_recv() {
             self.handle_ipc_command(cmd);
         }
 
-        // 2. Process output for all active surfaces and parse OSC sequences
+        // 3. Process output for all active surfaces and parse OSC sequences
         let mut dirty = false;
         let mut events_to_process = Vec::new();
 
@@ -1184,6 +1275,11 @@ impl eframe::App for AgeMaxApp {
                             }
                         });
                     });
+                }
+
+                // 4. Command Palette (Ctrl+Shift+P)
+                if let Some(action) = self.command_palette.show(ui.ctx()) {
+                    self.execute_palette_action(action);
                 }
             });
         });

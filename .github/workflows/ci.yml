@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  check-and-build:
+    name: Build, Test & Lint (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify Code Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy Linter
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run Workspace Tests
+        run: cargo test --workspace
+
+      - name: Check Dependency Licenses (cargo-deny)
+        run: |
+          cargo install --locked cargo-deny || true
+          cargo-deny check license
+
+      - name: Build Release Binaries
+        run: cargo build --release --workspace
+
+      - name: Package Release Archive
+        run: |
+          mkdir release
+          cp target/release/agemax-app.exe release/agemax-app.exe
+          cp target/release/agemax.exe release/agemax.exe
+          Compress-Archive -Path release/* -DestinationPath target/agemax-windows-x64.zip
+
+      - name: Upload Release Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agemax-windows-x64
+          path: target/agemax-windows-x64.zip

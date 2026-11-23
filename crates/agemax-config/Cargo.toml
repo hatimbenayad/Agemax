@@ -12,3 +12,4 @@ thiserror.workspace = true
 directories.workspace = true
 notify.workspace = true
 tracing.workspace = true
+uuid.workspace = true
