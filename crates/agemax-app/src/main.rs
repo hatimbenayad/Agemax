@@ -52,16 +52,32 @@ fn main() -> eframe::Result<()> {
 
 fn configure_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
-    fonts
-        .families
-        .entry(egui::FontFamily::Monospace)
-        .or_default()
-        .insert(0, "Cascadia Code".to_owned());
-    fonts
-        .families
-        .entry(egui::FontFamily::Monospace)
-        .or_default()
-        .insert(1, "Consolas".to_owned());
+
+    // On Windows, attempt to load Cascadia Code or Consolas if present
+    for path in &[
+        "C:\\Windows\\Fonts\\CascadiaCode.ttf",
+        "C:\\Windows\\Fonts\\cascadia.ttf",
+        "C:\\Windows\\Fonts\\consola.ttf",
+    ] {
+        if let Ok(font_bytes) = std::fs::read(path) {
+            let font_name = if path.contains("consol") {
+                "Consolas"
+            } else {
+                "Cascadia Code"
+            };
+            fonts.font_data.insert(
+                font_name.to_owned(),
+                std::sync::Arc::new(egui::FontData::from_owned(font_bytes)),
+            );
+            fonts
+                .families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .insert(0, font_name.to_owned());
+            break;
+        }
+    }
+
     ctx.set_fonts(fonts);
 }
 
