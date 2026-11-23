@@ -131,6 +131,37 @@ impl PtyInstance {
             cmd.env(k, v);
         }
 
+        // Child process environment defaults for clean terminal emulation & agent integration
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        cmd.env("AGY_CLI_OSC7501", "1");
+
+        // Augment PATH with common agent CLI install locations (~/.gemini/bin, %LOCALAPPDATA%\agy\bin)
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        let mut path_dirs = std::env::split_paths(&current_path).collect::<Vec<_>>();
+        let mut path_updated = false;
+
+        if let Ok(userprofile) = std::env::var("USERPROFILE") {
+            let gemini_bin = PathBuf::from(userprofile).join(".gemini").join("bin");
+            if gemini_bin.exists() && !path_dirs.contains(&gemini_bin) {
+                path_dirs.insert(0, gemini_bin);
+                path_updated = true;
+            }
+        }
+        if let Ok(local_appdata) = std::env::var("LOCALAPPDATA") {
+            let agy_bin = PathBuf::from(local_appdata).join("agy").join("bin");
+            if agy_bin.exists() && !path_dirs.contains(&agy_bin) {
+                path_dirs.insert(0, agy_bin);
+                path_updated = true;
+            }
+        }
+
+        if path_updated {
+            if let Ok(new_path) = std::env::join_paths(&path_dirs) {
+                cmd.env("PATH", new_path);
+            }
+        }
+
         // Create Windows Job Object to contain child process tree
         let job_object = Arc::new(JobObject::create()?);
 

@@ -13,3 +13,12 @@ local_test/
 temp/
 .vscode/
 .idea/
+
+# Security & Local State ignores
+.env
+.env.*
+*.log
+session.json
+*.db
+profiles/
+credentials.json

@@ -933,6 +933,8 @@ impl eframe::App for AgeMaxApp {
 
         if dirty {
             ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(30));
         }
     }
 
@@ -1155,37 +1157,92 @@ impl eframe::App for AgeMaxApp {
 
                                     for r in 0..cur_rows {
                                         let y = origin.y + (r as f32 * self.char_height);
+                                        let mut span_text = String::new();
+                                        let mut span_start_c = 0;
+                                        let mut span_fg = Color32::from_rgb(220, 224, 232);
+
                                         for c in 0..cur_cols {
                                             let cell = surface.get_cell(r, c);
                                             let x = origin.x + (c as f32 * self.char_width);
 
+                                            // Draw custom background if distinct from default dark pane
                                             if let Some(bg) = cell.bg {
-                                                let cell_rect = Rect::from_min_size(
-                                                    Pos2::new(x, y),
-                                                    Vec2::new(self.char_width, self.char_height),
-                                                );
-                                                painter.rect_filled(
-                                                    cell_rect,
-                                                    0.0,
-                                                    Color32::from_rgb(bg.r, bg.g, bg.b),
-                                                );
+                                                if bg.r > 28
+                                                    || bg.g > 28
+                                                    || bg.b > 38
+                                                    || (bg.r != 16
+                                                        && bg.g != 18
+                                                        && bg.b != 26
+                                                        && (bg.r > 5 || bg.g > 5 || bg.b > 5))
+                                                {
+                                                    let cell_rect = Rect::from_min_size(
+                                                        Pos2::new(x, y),
+                                                        Vec2::new(
+                                                            self.char_width,
+                                                            self.char_height,
+                                                        ),
+                                                    );
+                                                    painter.rect_filled(
+                                                        cell_rect,
+                                                        0.0,
+                                                        Color32::from_rgb(bg.r, bg.g, bg.b),
+                                                    );
+                                                }
                                             }
 
-                                            if cell.c != ' ' && cell.c != '\0' {
-                                                let fg_color = if let Some(fg) = cell.fg {
-                                                    Color32::from_rgb(fg.r, fg.g, fg.b)
-                                                } else {
-                                                    Color32::from_rgb(220, 224, 232)
-                                                };
+                                            let char_fg = if let Some(fg) = cell.fg {
+                                                Color32::from_rgb(fg.r, fg.g, fg.b)
+                                            } else {
+                                                Color32::from_rgb(220, 224, 232)
+                                            };
 
+                                            if cell.c == ' ' || cell.c == '\0' {
+                                                if !span_text.is_empty() {
+                                                    let span_x = origin.x
+                                                        + (span_start_c as f32 * self.char_width);
+                                                    painter.text(
+                                                        Pos2::new(span_x, y),
+                                                        egui::Align2::LEFT_TOP,
+                                                        &span_text,
+                                                        font_id.clone(),
+                                                        span_fg,
+                                                    );
+                                                    span_text.clear();
+                                                }
+                                                span_start_c = c + 1;
+                                            } else if span_text.is_empty() {
+                                                span_text.push(cell.c);
+                                                span_start_c = c;
+                                                span_fg = char_fg;
+                                            } else if span_fg == char_fg {
+                                                span_text.push(cell.c);
+                                            } else {
+                                                let span_x = origin.x
+                                                    + (span_start_c as f32 * self.char_width);
                                                 painter.text(
-                                                    Pos2::new(x, y),
+                                                    Pos2::new(span_x, y),
                                                     egui::Align2::LEFT_TOP,
-                                                    cell.c.to_string(),
+                                                    &span_text,
                                                     font_id.clone(),
-                                                    fg_color,
+                                                    span_fg,
                                                 );
+                                                span_text.clear();
+                                                span_text.push(cell.c);
+                                                span_start_c = c;
+                                                span_fg = char_fg;
                                             }
+                                        }
+
+                                        if !span_text.is_empty() {
+                                            let span_x =
+                                                origin.x + (span_start_c as f32 * self.char_width);
+                                            painter.text(
+                                                Pos2::new(span_x, y),
+                                                egui::Align2::LEFT_TOP,
+                                                &span_text,
+                                                font_id.clone(),
+                                                span_fg,
+                                            );
                                         }
                                     }
 

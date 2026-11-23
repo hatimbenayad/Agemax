@@ -139,7 +139,7 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
                                             ui.label(
-                                                egui::RichText::new(format!(" {}", branch))
+                                                egui::RichText::new(format!("⎇ {}", branch))
                                                     .size(10.0)
                                                     .color(Color32::from_rgb(110, 190, 140)),
                                             );

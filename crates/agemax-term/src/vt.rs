@@ -127,9 +127,53 @@ impl TerminalGrid {
         let grid = self.term.grid();
         let cell: &Cell = &grid[Line(row as i32)][Column(col)];
         let c = cell.c;
-        let fg = convert_color(cell.fg);
-        let bg = convert_color(cell.bg);
+        let mut fg = convert_color(cell.fg);
+        let mut bg = convert_color(cell.bg);
         let flags = cell.flags;
+
+        if flags.contains(Flags::INVERSE) {
+            std::mem::swap(&mut fg, &mut bg);
+            if fg.is_none() {
+                fg = Some(CellRgb {
+                    r: 16,
+                    g: 18,
+                    b: 26,
+                });
+            }
+            if bg.is_none() {
+                bg = Some(CellRgb {
+                    r: 220,
+                    g: 224,
+                    b: 235,
+                });
+            }
+        }
+
+        // Contrast guarantee: ensure foreground is always clearly readable against background
+        if let Some(ref mut fg_rgb) = fg {
+            let fg_lum =
+                (fg_rgb.r as u32 * 299 + fg_rgb.g as u32 * 587 + fg_rgb.b as u32 * 114) / 1000;
+            let bg_lum = if let Some(ref bg_rgb) = bg {
+                (bg_rgb.r as u32 * 299 + bg_rgb.g as u32 * 587 + bg_rgb.b as u32 * 114) / 1000
+            } else {
+                18 // default dark pane background
+            };
+
+            // If contrast difference is too low (< 45), boost or adjust foreground
+            if fg_lum.abs_diff(bg_lum) < 45 {
+                if bg_lum < 128 {
+                    // Dark background: boost foreground to crisp readable light gray
+                    fg_rgb.r = 220;
+                    fg_rgb.g = 224;
+                    fg_rgb.b = 235;
+                } else {
+                    // Light background: darken foreground to high-contrast dark slate
+                    fg_rgb.r = 20;
+                    fg_rgb.g = 22;
+                    fg_rgb.b = 30;
+                }
+            }
+        }
 
         RenderCell {
             c,
@@ -163,6 +207,42 @@ impl TerminalGrid {
     }
 }
 
+pub fn indexed_to_rgb(idx: u8) -> (u8, u8, u8) {
+    match idx {
+        // Standard ANSI 16 colors (modern high-contrast dark theme palette)
+        0 => (40, 44, 56),   // Black / Dark Slate (visible dark, never pure 0,0,0)
+        1 => (235, 75, 75),  // Red
+        2 => (50, 205, 120), // Green
+        3 => (245, 190, 50), // Yellow
+        4 => (75, 145, 245), // Blue
+        5 => (200, 95, 230), // Magenta
+        6 => (45, 210, 225), // Cyan
+        7 => (220, 224, 235), // Light Gray / White
+        8 => (95, 105, 125), // Bright Black / Slate Gray
+        9 => (255, 100, 100), // Bright Red
+        10 => (75, 230, 145), // Bright Green
+        11 => (255, 215, 75), // Bright Yellow
+        12 => (105, 175, 255), // Bright Blue
+        13 => (225, 130, 255), // Bright Magenta
+        14 => (75, 235, 245), // Bright Cyan
+        15 => (255, 255, 255), // Bright White
+        // 6x6x6 color cube: 16..=231
+        16..=231 => {
+            let offset = idx - 16;
+            let r_step = offset / 36;
+            let g_step = (offset % 36) / 6;
+            let b_step = offset % 6;
+            let to_val = |s: u8| if s == 0 { 0 } else { 55 + s * 40 };
+            (to_val(r_step), to_val(g_step), to_val(b_step))
+        }
+        // Grayscale ramp: 232..=255
+        232..=255 => {
+            let gray = 8 + (idx - 232) * 10;
+            (gray, gray, gray)
+        }
+    }
+}
+
 fn convert_color(c: Color) -> Option<CellRgb> {
     match c {
         Color::Spec(rgb) => Some(CellRgb {
@@ -172,30 +252,29 @@ fn convert_color(c: Color) -> Option<CellRgb> {
         }),
         Color::Named(named) => {
             let (r, g, b) = match named {
-                NamedColor::Black => (0, 0, 0),
-                NamedColor::Red => (205, 49, 49),
-                NamedColor::Green => (13, 188, 121),
-                NamedColor::Yellow => (229, 229, 16),
-                NamedColor::Blue => (36, 114, 200),
-                NamedColor::Magenta => (188, 63, 188),
-                NamedColor::Cyan => (17, 168, 205),
-                NamedColor::White => (229, 229, 229),
-                NamedColor::BrightBlack => (102, 102, 102),
-                NamedColor::BrightRed => (241, 76, 76),
-                NamedColor::BrightGreen => (35, 209, 139),
-                NamedColor::BrightYellow => (245, 245, 67),
-                NamedColor::BrightBlue => (59, 142, 234),
-                NamedColor::BrightMagenta => (214, 112, 214),
-                NamedColor::BrightCyan => (41, 184, 219),
+                NamedColor::Black => (40, 44, 56),
+                NamedColor::Red => (235, 75, 75),
+                NamedColor::Green => (50, 205, 120),
+                NamedColor::Yellow => (245, 190, 50),
+                NamedColor::Blue => (75, 145, 245),
+                NamedColor::Magenta => (200, 95, 230),
+                NamedColor::Cyan => (45, 210, 225),
+                NamedColor::White => (220, 224, 235),
+                NamedColor::BrightBlack => (95, 105, 125),
+                NamedColor::BrightRed => (255, 100, 100),
+                NamedColor::BrightGreen => (75, 230, 145),
+                NamedColor::BrightYellow => (255, 215, 75),
+                NamedColor::BrightBlue => (105, 175, 255),
+                NamedColor::BrightMagenta => (225, 130, 255),
+                NamedColor::BrightCyan => (75, 235, 245),
                 NamedColor::BrightWhite => (255, 255, 255),
                 _ => return None,
             };
             Some(CellRgb { r, g, b })
         }
-        Color::Indexed(idx) => Some(CellRgb {
-            r: idx,
-            g: idx,
-            b: idx,
-        }),
+        Color::Indexed(idx) => {
+            let (r, g, b) = indexed_to_rgb(idx);
+            Some(CellRgb { r, g, b })
+        }
     }
 }
