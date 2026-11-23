@@ -44,8 +44,11 @@ dependencies = [
  "eframe",
  "egui",
  "parking_lot",
+ "serde_json",
+ "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "windows",
 ]
 
@@ -77,6 +80,7 @@ dependencies = [
 name = "agemax-core"
 version = "0.1.0"
 dependencies = [
+ "directories",
  "proptest",
  "serde",
  "serde_json",
@@ -94,6 +98,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "uuid",
  "windows",
 ]
 

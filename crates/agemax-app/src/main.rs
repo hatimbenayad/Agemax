@@ -1,17 +1,23 @@
+mod ipc_bridge;
 mod notification_win;
 mod sidebar;
 mod tab_bar;
 
 use agemax_agy::osc::{AgentOscEvent, OscParser};
+use agemax_agy::profile::ProfileManager;
 use agemax_core::layout::{Direction, PaneId, SplitDirection, WorkspaceId};
 use agemax_core::model::{Point, Rect as CoreRect, TerminalSize};
 use agemax_core::notification::NotificationStore;
+use agemax_core::session::{
+    LayoutSnapshot, PaneSnapshot, SessionSnapshot, TabSnapshot, WorkspaceSnapshot,
+};
 use agemax_core::status::AgentStatus;
 use agemax_core::workspace::{Tab, Workspace};
 use agemax_term::metadata::detect_git_branch;
 use agemax_term::pty::{detect_default_shell, PtyConfig};
 use agemax_term::surface::TerminalSurface;
 use eframe::egui::{self, Color32, FontId, Key, Pos2, Rect, Stroke, StrokeKind, Vec2};
+use ipc_bridge::{start_ipc_server, IpcAppCommand};
 use notification_win::{NotificationService, PlatformNotificationService};
 use sidebar::{render_sidebar, SidebarAction, SidebarProps, SidebarWorkspaceMeta};
 use std::collections::HashMap;
@@ -35,7 +41,7 @@ fn main() -> eframe::Result<()> {
         native_options,
         Box::new(|cc| {
             configure_fonts(&cc.egui_ctx);
-            Ok(Box::new(AgeMaxApp::new()))
+            Ok(Box::new(AgeMaxApp::new(Some(cc))))
         }),
     )
 }
@@ -61,8 +67,10 @@ pub struct AgeMaxApp {
     surfaces: HashMap<PaneId, TerminalSurface>,
     osc_parsers: HashMap<PaneId, OscParser>,
     pane_status: HashMap<PaneId, AgentStatus>,
+    agent_conversation_ids: HashMap<PaneId, String>,
     notification_store: NotificationStore,
     notification_service: Box<dyn NotificationService>,
+    ipc_rx: crossbeam_channel::Receiver<IpcAppCommand>,
     show_notifications_panel: bool,
     is_sidebar_collapsed: bool,
     font_size: f32,
@@ -74,12 +82,12 @@ pub struct AgeMaxApp {
 
 impl Default for AgeMaxApp {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }
 
 impl AgeMaxApp {
-    pub fn new() -> Self {
+    pub fn new(cc: Option<&eframe::CreationContext>) -> Self {
         let start_time = Instant::now();
         let initial_pane = PaneId::new();
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -100,14 +108,21 @@ impl AgeMaxApp {
         let mut pane_status = HashMap::new();
         pane_status.insert(initial_pane, AgentStatus::Idle);
 
+        let (ipc_tx, ipc_rx) = crossbeam_channel::unbounded();
+        if let Some(ctx_container) = cc {
+            start_ipc_server(ipc_tx, ctx_container.egui_ctx.clone());
+        }
+
         Self {
             workspaces: vec![initial_workspace],
             active_workspace_index: 0,
             surfaces,
             osc_parsers,
             pane_status,
+            agent_conversation_ids: HashMap::new(),
             notification_store: NotificationStore::new(),
             notification_service: Box::new(PlatformNotificationService::new()),
+            ipc_rx,
             show_notifications_panel: false,
             is_sidebar_collapsed: false,
             font_size: 14.0,
@@ -141,6 +156,54 @@ impl AgeMaxApp {
         None
     }
 
+    pub fn save_session(&self) {
+        let ws_snapshots = self
+            .workspaces
+            .iter()
+            .map(|ws| {
+                let tab_snapshots = ws
+                    .tabs
+                    .iter()
+                    .map(|tab| {
+                        let layout_snap = LayoutSnapshot::from(&tab.layout);
+                        let panes = tab
+                            .layout
+                            .panes()
+                            .iter()
+                            .map(|&pid| PaneSnapshot {
+                                id: pid.0,
+                                cwd: ws.cwd.clone(),
+                                agent_conversation_id: self
+                                    .agent_conversation_ids
+                                    .get(&pid)
+                                    .cloned(),
+                                last_command: None,
+                            })
+                            .collect();
+                        TabSnapshot {
+                            name: tab.title.clone(),
+                            active_pane_id: tab.active_pane.0,
+                            layout: layout_snap,
+                            panes,
+                        }
+                    })
+                    .collect();
+                WorkspaceSnapshot {
+                    id: ws.id.0,
+                    name: ws.name.clone(),
+                    cwd: ws.cwd.clone(),
+                    profile: None,
+                    active_tab_index: ws.active_tab_index,
+                    tabs: tab_snapshots,
+                }
+            })
+            .collect();
+
+        let snapshot = SessionSnapshot::new(self.active_workspace_index, ws_snapshots);
+        let path = SessionSnapshot::default_path();
+        let _ = snapshot.save_to_file(&path);
+    }
+
     pub fn split_active_pane(&mut self, direction: SplitDirection) {
         let (active_pane, cwd) = match self.active_workspace() {
             Some(ws) => match ws.active_pane_id() {
@@ -162,6 +225,7 @@ impl AgeMaxApp {
                     tab.active_pane = new_pane_id;
                 }
             }
+            self.save_session();
         }
     }
 
@@ -190,6 +254,7 @@ impl AgeMaxApp {
             self.surfaces.remove(&pane);
             self.osc_parsers.remove(&pane);
             self.pane_status.remove(&pane);
+            self.agent_conversation_ids.remove(&pane);
         }
 
         if close_tab {
@@ -202,6 +267,7 @@ impl AgeMaxApp {
                 }
             }
         }
+        self.save_session();
     }
 
     pub fn navigate_focus(&mut self, dir: Direction, bounds: CoreRect) {
@@ -210,6 +276,220 @@ impl AgeMaxApp {
                 if let Some(neighbor) = tab.layout.find_neighbor(tab.active_pane, dir, bounds) {
                     tab.active_pane = neighbor;
                 }
+            }
+        }
+    }
+
+    fn handle_ipc_command(&mut self, cmd: IpcAppCommand) {
+        match cmd {
+            IpcAppCommand::WorkspaceList { reply } => {
+                let list: Vec<serde_json::Value> = self
+                    .workspaces
+                    .iter()
+                    .map(|ws| {
+                        serde_json::json!({
+                            "id": ws.id.0.to_string(),
+                            "name": ws.name,
+                            "cwd": ws.cwd.to_string_lossy(),
+                            "active_tab": ws.active_tab_index,
+                            "tab_count": ws.tabs.len(),
+                        })
+                    })
+                    .collect();
+                let _ = reply.send(serde_json::json!(list));
+            }
+            IpcAppCommand::WorkspaceCreate { name, cwd, reply } => {
+                let pane_id = PaneId::new();
+                let dir = cwd.map(PathBuf::from).unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                });
+                let ws_name =
+                    name.unwrap_or_else(|| format!("Workspace {}", self.workspaces.len() + 1));
+                let mut ws = Workspace::new(ws_name, dir.clone(), pane_id);
+                ws.git_branch = detect_git_branch(&dir);
+
+                if let Ok(surface) = spawn_terminal_surface(TerminalSize::new(80, 24), &dir) {
+                    self.surfaces.insert(pane_id, surface);
+                    self.osc_parsers.insert(pane_id, OscParser::new());
+                    self.pane_status.insert(pane_id, AgentStatus::Idle);
+                    self.workspaces.push(ws);
+                    self.active_workspace_index = self.workspaces.len() - 1;
+                    self.save_session();
+
+                    let last_ws = self.workspaces.last().unwrap();
+                    let _ = reply.send(serde_json::json!({
+                        "id": last_ws.id.0.to_string(),
+                        "name": last_ws.name
+                    }));
+                } else {
+                    let _ = reply.send(serde_json::json!({ "error": "Failed to spawn surface" }));
+                }
+            }
+            IpcAppCommand::WorkspaceClose { id, reply } => {
+                if let Some(idx) = self.workspaces.iter().position(|w| w.id == id) {
+                    if self.workspaces.len() > 1 {
+                        let ws = self.workspaces.remove(idx);
+                        for tab in ws.tabs {
+                            for p in tab.layout.panes() {
+                                self.surfaces.remove(&p);
+                                self.osc_parsers.remove(&p);
+                                self.pane_status.remove(&p);
+                                self.agent_conversation_ids.remove(&p);
+                            }
+                        }
+                        if self.active_workspace_index >= self.workspaces.len() {
+                            self.active_workspace_index = self.workspaces.len().saturating_sub(1);
+                        }
+                        self.save_session();
+                        let _ = reply.send(serde_json::json!({ "closed": id.0.to_string() }));
+                    } else {
+                        let _ = reply.send(serde_json::json!({
+                            "error": "Cannot close only remaining workspace"
+                        }));
+                    }
+                } else {
+                    let _ = reply.send(serde_json::json!({ "error": "Workspace not found" }));
+                }
+            }
+            IpcAppCommand::SplitPane { direction, reply } => {
+                self.split_active_pane(direction);
+                let _ = reply.send(serde_json::json!({
+                    "active_pane": self.active_pane_id().map(|p| p.0.to_string())
+                }));
+            }
+            IpcAppCommand::FocusPane { pane_id, reply } => {
+                let mut found = false;
+                for (w_idx, ws) in self.workspaces.iter_mut().enumerate() {
+                    for tab in &mut ws.tabs {
+                        if tab.layout.panes().contains(&pane_id) {
+                            tab.active_pane = pane_id;
+                            self.active_workspace_index = w_idx;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if found {
+                        break;
+                    }
+                }
+                let _ = reply.send(serde_json::json!({
+                    "focused": pane_id.0.to_string(),
+                    "found": found
+                }));
+            }
+            IpcAppCommand::SendKeys {
+                pane_id,
+                keys,
+                reply,
+            } => {
+                let target = pane_id.or_else(|| self.active_pane_id());
+                let mut bytes_written = 0;
+                if let Some(id) = target {
+                    if let Some(surface) = self.surfaces.get_mut(&id) {
+                        let _ = surface.send_input(keys.as_bytes());
+                        bytes_written = keys.len();
+                    }
+                }
+                let _ = reply.send(serde_json::json!({ "sent_bytes": bytes_written }));
+            }
+            IpcAppCommand::ReadScreen { pane_id, reply } => {
+                let target = pane_id.or_else(|| self.active_pane_id());
+                let mut screen_text = String::new();
+                if let Some(id) = target {
+                    if let Some(surface) = self.surfaces.get(&id) {
+                        let rows = surface.rows();
+                        let cols = surface.cols();
+                        for r in 0..rows {
+                            let mut line = String::new();
+                            for c in 0..cols {
+                                let cell = surface.get_cell(r, c);
+                                if cell.c == '\0' {
+                                    line.push(' ');
+                                } else {
+                                    line.push(cell.c);
+                                }
+                            }
+                            screen_text.push_str(line.trim_end());
+                            screen_text.push('\n');
+                        }
+                    }
+                }
+                let _ = reply.send(serde_json::json!(screen_text));
+            }
+            IpcAppCommand::Notify {
+                title,
+                message,
+                status,
+                reply,
+            } => {
+                let active_ws_id = self.active_workspace().map(|w| w.id).unwrap_or_default();
+                let target_pane = self.active_pane_id().unwrap_or_default();
+                let st = status.unwrap_or(AgentStatus::WaitingForInput);
+                let full_msg = format!("{title}: {message}");
+
+                self.notification_store
+                    .notify(active_ws_id, target_pane, st, &full_msg);
+                if let Some(item) = self
+                    .notification_store
+                    .latest_unread_for_workspace(active_ws_id)
+                {
+                    self.notification_service.show_notification(item);
+                }
+                self.notification_service.flash_window();
+                let _ = reply.send(serde_json::json!({ "status": "notified" }));
+            }
+            IpcAppCommand::StatusSet {
+                pane_id,
+                status,
+                message,
+                reply,
+            } => {
+                let target = pane_id.or_else(|| self.active_pane_id());
+                if let Some(id) = target {
+                    self.pane_status.insert(id, status);
+                    if let Some(msg) = message {
+                        if let Some(ws_id) = self.find_workspace_for_pane(id) {
+                            self.notification_store.notify(ws_id, id, status, msg);
+                        }
+                    }
+                }
+                let _ = reply.send(serde_json::json!({ "status": status.display_name() }));
+            }
+            IpcAppCommand::ResumeSession {
+                pane_id,
+                conversation_id,
+                reply,
+            } => {
+                let target = pane_id.or_else(|| self.active_pane_id());
+                let mut resumed = false;
+                if let Some(id) = target {
+                    let conv_id =
+                        conversation_id.or_else(|| self.agent_conversation_ids.get(&id).cloned());
+                    if let Some(cid) = conv_id {
+                        if let Some(surface) = self.surfaces.get_mut(&id) {
+                            let cmd = format!("agy --conversation {}\r", cid);
+                            let _ = surface.send_input(cmd.as_bytes());
+                            resumed = true;
+                        }
+                    }
+                }
+                let _ = reply.send(serde_json::json!({ "resumed": resumed }));
+            }
+            IpcAppCommand::ProfileList { reply } => {
+                let pm = ProfileManager::new();
+                let profiles: Vec<serde_json::Value> = pm
+                    .list_profiles()
+                    .into_iter()
+                    .map(|p| {
+                        serde_json::json!({
+                            "name": p.name,
+                            "account_override": p.account_override,
+                            "isolate_storage": p.isolate_storage,
+                            "dir": p.profile_dir.to_string_lossy(),
+                        })
+                    })
+                    .collect();
+                let _ = reply.send(serde_json::json!(profiles));
             }
         }
     }
@@ -467,6 +747,12 @@ impl eframe::App for AgeMaxApp {
             self.first_frame_rendered = true;
         }
 
+        // 1. Process pending IPC commands
+        while let Ok(cmd) = self.ipc_rx.try_recv() {
+            self.handle_ipc_command(cmd);
+        }
+
+        // 2. Process output for all active surfaces and parse OSC sequences
         let mut dirty = false;
         let mut events_to_process = Vec::new();
 
@@ -601,6 +887,7 @@ impl eframe::App for AgeMaxApp {
                                 self.pane_status.insert(pane_id, AgentStatus::Idle);
                                 self.workspaces.push(ws);
                                 self.active_workspace_index = self.workspaces.len() - 1;
+                                self.save_session();
                             }
                         }
                         SidebarAction::ToggleCollapse => {
@@ -640,6 +927,7 @@ impl eframe::App for AgeMaxApp {
                                             new_pane,
                                         ));
                                         ws.active_tab_index = ws.tabs.len() - 1;
+                                        self.save_session();
                                     }
                                 }
                             }
@@ -651,10 +939,12 @@ impl eframe::App for AgeMaxApp {
                                             self.surfaces.remove(&p);
                                             self.osc_parsers.remove(&p);
                                             self.pane_status.remove(&p);
+                                            self.agent_conversation_ids.remove(&p);
                                         }
                                         if ws.active_tab_index >= ws.tabs.len() {
                                             ws.active_tab_index = ws.tabs.len().saturating_sub(1);
                                         }
+                                        self.save_session();
                                     }
                                 }
                             }
