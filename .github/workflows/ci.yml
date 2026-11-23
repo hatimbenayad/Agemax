@@ -31,10 +31,11 @@ jobs:
       - name: Run Workspace Tests
         run: cargo test --workspace
 
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
       - name: Check Dependency Licenses (cargo-deny)
-        run: |
-          cargo install --locked cargo-deny || true
-          cargo-deny check license
+        run: cargo-deny check licenses
 
       - name: Build Release Binaries
         run: cargo build --release --workspace
