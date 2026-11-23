@@ -3,7 +3,10 @@
 use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(name = "agemax", about = "Age Max CLI - Control the Age Max multiplexer")]
+#[command(
+    name = "agemax",
+    about = "Age Max CLI - Control the Age Max multiplexer"
+)]
 struct Cli {
     #[arg(short, long)]
     verbose: bool,

@@ -10,6 +10,10 @@ agemax-term = { path = "../agemax-term" }
 agemax-agy = { path = "../agemax-agy" }
 agemax-ipc = { path = "../agemax-ipc" }
 agemax-config = { path = "../agemax-config" }
+eframe.workspace = true
+egui.workspace = true
+parking_lot.workspace = true
+crossbeam-channel.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
