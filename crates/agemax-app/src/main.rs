@@ -1,14 +1,19 @@
+mod notification_win;
 mod sidebar;
 mod tab_bar;
 
-use agemax_core::layout::{Direction, PaneId, SplitDirection};
+use agemax_agy::osc::{AgentOscEvent, OscParser};
+use agemax_core::layout::{Direction, PaneId, SplitDirection, WorkspaceId};
 use agemax_core::model::{Point, Rect as CoreRect, TerminalSize};
+use agemax_core::notification::NotificationStore;
+use agemax_core::status::AgentStatus;
 use agemax_core::workspace::{Tab, Workspace};
 use agemax_term::metadata::detect_git_branch;
 use agemax_term::pty::{detect_default_shell, PtyConfig};
 use agemax_term::surface::TerminalSurface;
 use eframe::egui::{self, Color32, FontId, Key, Pos2, Rect, Stroke, StrokeKind, Vec2};
-use sidebar::{render_sidebar, SidebarAction, SidebarProps};
+use notification_win::{NotificationService, PlatformNotificationService};
+use sidebar::{render_sidebar, SidebarAction, SidebarProps, SidebarWorkspaceMeta};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -54,6 +59,11 @@ pub struct AgeMaxApp {
     workspaces: Vec<Workspace>,
     active_workspace_index: usize,
     surfaces: HashMap<PaneId, TerminalSurface>,
+    osc_parsers: HashMap<PaneId, OscParser>,
+    pane_status: HashMap<PaneId, AgentStatus>,
+    notification_store: NotificationStore,
+    notification_service: Box<dyn NotificationService>,
+    show_notifications_panel: bool,
     is_sidebar_collapsed: bool,
     font_size: f32,
     char_width: f32,
@@ -84,10 +94,21 @@ impl AgeMaxApp {
         let mut surfaces = HashMap::new();
         surfaces.insert(initial_pane, initial_surface);
 
+        let mut osc_parsers = HashMap::new();
+        osc_parsers.insert(initial_pane, OscParser::new());
+
+        let mut pane_status = HashMap::new();
+        pane_status.insert(initial_pane, AgentStatus::Idle);
+
         Self {
             workspaces: vec![initial_workspace],
             active_workspace_index: 0,
             surfaces,
+            osc_parsers,
+            pane_status,
+            notification_store: NotificationStore::new(),
+            notification_service: Box::new(PlatformNotificationService::new()),
+            show_notifications_panel: false,
             is_sidebar_collapsed: false,
             font_size: 14.0,
             char_width: 8.4,
@@ -109,6 +130,17 @@ impl AgeMaxApp {
         self.active_workspace().and_then(|ws| ws.active_pane_id())
     }
 
+    fn find_workspace_for_pane(&self, pane_id: PaneId) -> Option<WorkspaceId> {
+        for ws in &self.workspaces {
+            for tab in &ws.tabs {
+                if tab.layout.panes().contains(&pane_id) {
+                    return Some(ws.id);
+                }
+            }
+        }
+        None
+    }
+
     pub fn split_active_pane(&mut self, direction: SplitDirection) {
         let (active_pane, cwd) = match self.active_workspace() {
             Some(ws) => match ws.active_pane_id() {
@@ -121,6 +153,8 @@ impl AgeMaxApp {
         let new_pane_id = PaneId::new();
         if let Ok(surface) = spawn_terminal_surface(TerminalSize::new(80, 24), &cwd) {
             self.surfaces.insert(new_pane_id, surface);
+            self.osc_parsers.insert(new_pane_id, OscParser::new());
+            self.pane_status.insert(new_pane_id, AgentStatus::Idle);
 
             if let Some(ws) = self.active_workspace_mut() {
                 if let Some(tab) = ws.active_tab_mut() {
@@ -154,6 +188,8 @@ impl AgeMaxApp {
 
         if let Some(pane) = active_pane {
             self.surfaces.remove(&pane);
+            self.osc_parsers.remove(&pane);
+            self.pane_status.remove(&pane);
         }
 
         if close_tab {
@@ -186,6 +222,10 @@ impl AgeMaxApp {
             match event {
                 egui::Event::Text(text) => {
                     if let Some(id) = focused_pane_id {
+                        self.notification_store.mark_pane_read(id);
+                        if self.pane_status.get(&id) == Some(&AgentStatus::WaitingForInput) {
+                            self.pane_status.insert(id, AgentStatus::Working);
+                        }
                         if let Some(surface) = self.surfaces.get_mut(&id) {
                             let _ = surface.send_input(text.as_bytes());
                         }
@@ -225,6 +265,29 @@ impl AgeMaxApp {
                                 }
                                 continue;
                             }
+                            Key::U => {
+                                // Jump to oldest unread waiting pane
+                                if let Some((ws_id, pane_id)) =
+                                    self.notification_store.oldest_unread_pane()
+                                {
+                                    if let Some(idx) =
+                                        self.workspaces.iter().position(|w| w.id == ws_id)
+                                    {
+                                        self.active_workspace_index = idx;
+                                        if let Some(ws) = self.workspaces.get_mut(idx) {
+                                            if let Some(tab) = ws.active_tab_mut() {
+                                                tab.active_pane = pane_id;
+                                            }
+                                        }
+                                        self.notification_store.mark_pane_read(pane_id);
+                                    }
+                                }
+                                continue;
+                            }
+                            Key::N => {
+                                self.show_notifications_panel = !self.show_notifications_panel;
+                                continue;
+                            }
                             Key::V => {
                                 // Paste
                                 if let Some(clipboard) = ctx.input(|i| {
@@ -237,6 +300,12 @@ impl AgeMaxApp {
                                     })
                                 }) {
                                     if let Some(id) = focused_pane_id {
+                                        self.notification_store.mark_pane_read(id);
+                                        if self.pane_status.get(&id)
+                                            == Some(&AgentStatus::WaitingForInput)
+                                        {
+                                            self.pane_status.insert(id, AgentStatus::Working);
+                                        }
                                         if let Some(surface) = self.surfaces.get_mut(&id) {
                                             let _ = surface.send_input(clipboard.as_bytes());
                                         }
@@ -273,6 +342,11 @@ impl AgeMaxApp {
 
                     // Forward keys to focused terminal surface
                     if let Some(id) = focused_pane_id {
+                        self.notification_store.mark_pane_read(id);
+                        if self.pane_status.get(&id) == Some(&AgentStatus::WaitingForInput) {
+                            self.pane_status.insert(id, AgentStatus::Working);
+                        }
+
                         if let Some(surface) = self.surfaces.get_mut(&id) {
                             if modifiers.ctrl && !modifiers.shift && !modifiers.alt {
                                 match key {
@@ -351,6 +425,10 @@ impl AgeMaxApp {
                 }
                 egui::Event::Paste(text) => {
                     if let Some(id) = focused_pane_id {
+                        self.notification_store.mark_pane_read(id);
+                        if self.pane_status.get(&id) == Some(&AgentStatus::WaitingForInput) {
+                            self.pane_status.insert(id, AgentStatus::Working);
+                        }
                         if let Some(surface) = self.surfaces.get_mut(&id) {
                             let _ = surface.send_input(text.as_bytes());
                         }
@@ -389,13 +467,77 @@ impl eframe::App for AgeMaxApp {
             self.first_frame_rendered = true;
         }
 
-        // Process output for all active surfaces
         let mut dirty = false;
-        for surface in self.surfaces.values_mut() {
-            if surface.process_output() {
+        let mut events_to_process = Vec::new();
+
+        for (&pane_id, surface) in self.surfaces.iter_mut() {
+            let parser = self.osc_parsers.entry(pane_id).or_default();
+            if surface.process_output_with(|chunk| {
+                let evs = parser.parse(chunk);
+                if !evs.is_empty() {
+                    events_to_process.push((pane_id, evs));
+                }
+            }) {
                 dirty = true;
             }
         }
+
+        for (pane_id, events) in events_to_process {
+            for event in events {
+                match event {
+                    AgentOscEvent::StatusChange { status, message } => {
+                        self.pane_status.insert(pane_id, status);
+                        if status.is_attention_needed() {
+                            if let Some(ws_id) = self.find_workspace_for_pane(pane_id) {
+                                let msg =
+                                    message.unwrap_or_else(|| status.display_name().to_string());
+                                self.notification_store.notify(ws_id, pane_id, status, &msg);
+                                if let Some(item) =
+                                    self.notification_store.latest_unread_for_workspace(ws_id)
+                                {
+                                    self.notification_service.show_notification(item);
+                                }
+                                self.notification_service.flash_window();
+                            }
+                        }
+                    }
+                    AgentOscEvent::Notification { title, message } => {
+                        if let Some(ws_id) = self.find_workspace_for_pane(pane_id) {
+                            let formatted = format!("{}: {}", title, message);
+                            self.notification_store.notify(
+                                ws_id,
+                                pane_id,
+                                AgentStatus::WaitingForInput,
+                                &formatted,
+                            );
+                            if let Some(item) =
+                                self.notification_store.latest_unread_for_workspace(ws_id)
+                            {
+                                self.notification_service.show_notification(item);
+                            }
+                            self.notification_service.flash_window();
+                        }
+                    }
+                    AgentOscEvent::Bell => {
+                        if let Some(ws_id) = self.find_workspace_for_pane(pane_id) {
+                            self.notification_store.notify(
+                                ws_id,
+                                pane_id,
+                                AgentStatus::WaitingForInput,
+                                "Terminal Bell",
+                            );
+                            if let Some(item) =
+                                self.notification_store.latest_unread_for_workspace(ws_id)
+                            {
+                                self.notification_service.show_notification(item);
+                            }
+                            self.notification_service.flash_window();
+                        }
+                    }
+                }
+            }
+        }
+
         if dirty {
             ctx.request_repaint();
         }
@@ -405,6 +547,25 @@ impl eframe::App for AgeMaxApp {
         let full_frame = egui::Frame::new().fill(Color32::from_rgb(15, 17, 23));
         full_frame.show(ui, |ui| {
             ui.horizontal(|ui| {
+                // Prepare sidebar metadata
+                let sidebar_meta: Vec<SidebarWorkspaceMeta> = self
+                    .workspaces
+                    .iter()
+                    .map(|ws| {
+                        let unread_count =
+                            self.notification_store.unread_count_for_workspace(ws.id);
+                        let latest_snippet = self
+                            .notification_store
+                            .latest_unread_for_workspace(ws.id)
+                            .map(|i| i.message.clone());
+                        SidebarWorkspaceMeta {
+                            unread_count,
+                            latest_snippet,
+                            status: None,
+                        }
+                    })
+                    .collect();
+
                 // 1. Sidebar on the left
                 let sidebar_action = render_sidebar(
                     ui,
@@ -412,6 +573,7 @@ impl eframe::App for AgeMaxApp {
                         workspaces: &self.workspaces,
                         active_index: self.active_workspace_index,
                         is_collapsed: self.is_sidebar_collapsed,
+                        meta: &sidebar_meta,
                     },
                 );
 
@@ -435,6 +597,8 @@ impl eframe::App for AgeMaxApp {
                                 spawn_terminal_surface(TerminalSize::new(80, 24), &cwd)
                             {
                                 self.surfaces.insert(pane_id, surface);
+                                self.osc_parsers.insert(pane_id, OscParser::new());
+                                self.pane_status.insert(pane_id, AgentStatus::Idle);
                                 self.workspaces.push(ws);
                                 self.active_workspace_index = self.workspaces.len() - 1;
                             }
@@ -468,6 +632,8 @@ impl eframe::App for AgeMaxApp {
                                         spawn_terminal_surface(TerminalSize::new(80, 24), &ws.cwd)
                                     {
                                         self.surfaces.insert(new_pane, surface);
+                                        self.osc_parsers.insert(new_pane, OscParser::new());
+                                        self.pane_status.insert(new_pane, AgentStatus::Idle);
                                         let tab_num = ws.tabs.len() + 1;
                                         ws.tabs.push(Tab::new(
                                             format!("Terminal {}", tab_num),
@@ -483,6 +649,8 @@ impl eframe::App for AgeMaxApp {
                                         let closed_tab = ws.tabs.remove(idx);
                                         for p in closed_tab.layout.panes() {
                                             self.surfaces.remove(&p);
+                                            self.osc_parsers.remove(&p);
+                                            self.pane_status.remove(&p);
                                         }
                                         if ws.active_tab_index >= ws.tabs.len() {
                                             ws.active_tab_index = ws.tabs.len().saturating_sub(1);
@@ -549,16 +717,27 @@ impl eframe::App for AgeMaxApp {
                                     }
                                 }
 
-                                // Pane border highlight
-                                let border_color = if is_focused {
-                                    Color32::from_rgb(70, 110, 200)
-                                } else {
-                                    Color32::from_rgb(32, 35, 45)
+                                // Pane border highlight with colored attention ring
+                                let pane_status = self
+                                    .pane_status
+                                    .get(&pane_id)
+                                    .copied()
+                                    .unwrap_or(AgentStatus::Idle);
+
+                                let (border_color, stroke_width) = match pane_status {
+                                    AgentStatus::WaitingForInput => {
+                                        (Color32::from_rgb(245, 175, 45), 3.0)
+                                    }
+                                    AgentStatus::Done => (Color32::from_rgb(45, 200, 110), 2.5),
+                                    AgentStatus::Failed => (Color32::from_rgb(235, 60, 60), 3.0),
+                                    _ if is_focused => (Color32::from_rgb(70, 110, 200), 1.5),
+                                    _ => (Color32::from_rgb(32, 35, 45), 1.0),
                                 };
+
                                 painter.rect_stroke(
                                     egui_rect,
                                     2.0,
-                                    Stroke::new(if is_focused { 1.5 } else { 1.0 }, border_color),
+                                    Stroke::new(stroke_width, border_color),
                                     StrokeKind::Inside,
                                 );
 
@@ -637,6 +816,85 @@ impl eframe::App for AgeMaxApp {
                         }
                     }
                 });
+
+                // 3. Optional Right-Side Notification History Panel (Ctrl+Shift+N)
+                if self.show_notifications_panel {
+                    ui.allocate_ui(Vec2::new(260.0, ui.available_height()), |ui| {
+                        let frame = egui::Frame::new()
+                            .fill(Color32::from_rgb(22, 24, 34))
+                            .stroke(Stroke::new(1.0, Color32::from_rgb(40, 44, 60)))
+                            .inner_margin(8.0);
+
+                        frame.show(ui, |ui| {
+                            ui.heading(
+                                egui::RichText::new("NOTIFICATIONS")
+                                    .size(12.0)
+                                    .color(Color32::from_rgb(160, 165, 180))
+                                    .strong(),
+                            );
+                            ui.separator();
+                            ui.add_space(4.0);
+
+                            let unread = self.notification_store.unread_items();
+                            if unread.is_empty() {
+                                ui.label(
+                                    egui::RichText::new("All caught up! No unread notifications.")
+                                        .size(11.0)
+                                        .color(Color32::GRAY),
+                                );
+                            } else {
+                                let mut jump_target = None;
+                                for item in unread {
+                                    ui.group(|ui| {
+                                        let status_color = match item.status {
+                                            AgentStatus::WaitingForInput => {
+                                                Color32::from_rgb(245, 175, 45)
+                                            }
+                                            AgentStatus::Done => Color32::from_rgb(45, 200, 110),
+                                            AgentStatus::Failed => Color32::from_rgb(235, 60, 60),
+                                            _ => Color32::WHITE,
+                                        };
+
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "{} {}",
+                                                item.status.icon(),
+                                                item.status.display_name()
+                                            ))
+                                            .size(11.0)
+                                            .color(status_color)
+                                            .strong(),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(&item.message)
+                                                .size(11.0)
+                                                .color(Color32::from_rgb(200, 205, 220)),
+                                        );
+
+                                        if ui.button("Focus Pane").clicked() {
+                                            jump_target = Some((item.workspace_id, item.pane_id));
+                                        }
+                                    });
+                                    ui.add_space(4.0);
+                                }
+
+                                if let Some((ws_id, pane_id)) = jump_target {
+                                    if let Some(pos) =
+                                        self.workspaces.iter().position(|w| w.id == ws_id)
+                                    {
+                                        self.active_workspace_index = pos;
+                                        if let Some(ws) = self.workspaces.get_mut(pos) {
+                                            if let Some(tab) = ws.active_tab_mut() {
+                                                tab.active_pane = pane_id;
+                                            }
+                                        }
+                                        self.notification_store.mark_pane_read(pane_id);
+                                    }
+                                }
+                            }
+                        });
+                    });
+                }
             });
         });
     }

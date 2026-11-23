@@ -36,9 +36,15 @@ impl TerminalSurface {
     /// Process any pending output from the PTY reader coalescer.
     /// Returns true if new data arrived and the screen should be repainted.
     pub fn process_output(&mut self) -> bool {
+        self.process_output_with(|_| {})
+    }
+
+    /// Process pending output while providing access to each raw chunk.
+    pub fn process_output_with<F: FnMut(&[u8])>(&mut self, mut on_chunk: F) -> bool {
         let mut dirty = false;
         let mut grid = self.grid.write();
         while let Ok(chunk) = self.rx.try_recv() {
+            on_chunk(&chunk);
             grid.advance_bytes(&chunk);
             dirty = true;
         }

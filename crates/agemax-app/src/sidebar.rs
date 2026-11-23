@@ -1,10 +1,19 @@
+use agemax_core::status::AgentStatus;
 use agemax_core::workspace::Workspace;
 use eframe::egui::{self, Color32, Stroke, Vec2};
+
+#[derive(Debug, Clone, Default)]
+pub struct SidebarWorkspaceMeta {
+    pub unread_count: usize,
+    pub latest_snippet: Option<String>,
+    pub status: Option<AgentStatus>,
+}
 
 pub struct SidebarProps<'a> {
     pub workspaces: &'a [Workspace],
     pub active_index: usize,
     pub is_collapsed: bool,
+    pub meta: &'a [SidebarWorkspaceMeta],
 }
 
 pub enum SidebarAction {
@@ -50,8 +59,13 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                 // Workspace list
                 for (idx, ws) in props.workspaces.iter().enumerate() {
                     let is_active = idx == props.active_index;
+                    let meta = props.meta.get(idx).cloned().unwrap_or_default();
+                    let has_unread = meta.unread_count > 0;
+
                     let bg_color = if is_active {
                         Color32::from_rgb(38, 42, 58)
+                    } else if has_unread {
+                        Color32::from_rgb(32, 28, 20)
                     } else {
                         Color32::TRANSPARENT
                     };
@@ -64,32 +78,60 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                     btn_frame.show(ui, |ui| {
                         if props.is_collapsed {
                             let first_letter = ws.name.chars().next().unwrap_or('W').to_string();
+                            let text_color = if is_active {
+                                Color32::WHITE
+                            } else if has_unread {
+                                Color32::from_rgb(245, 175, 45)
+                            } else {
+                                Color32::GRAY
+                            };
                             let resp = ui.button(
                                 egui::RichText::new(first_letter)
-                                    .color(if is_active {
-                                        Color32::WHITE
-                                    } else {
-                                        Color32::GRAY
-                                    })
+                                    .color(text_color)
                                     .size(14.0)
                                     .strong(),
                             );
                             if resp.clicked() {
                                 action = Some(SidebarAction::SelectWorkspace(idx));
                             }
-                            resp.on_hover_text(&ws.name);
+                            let tooltip = if has_unread {
+                                format!("{} ({} unread)", ws.name, meta.unread_count)
+                            } else {
+                                ws.name.clone()
+                            };
+                            resp.on_hover_text(tooltip);
                         } else {
                             ui.horizontal(|ui| {
+                                let label_color = if is_active {
+                                    Color32::WHITE
+                                } else if has_unread {
+                                    Color32::from_rgb(245, 175, 45)
+                                } else {
+                                    Color32::from_rgb(180, 185, 200)
+                                };
                                 let label_text = egui::RichText::new(&ws.name)
-                                    .color(if is_active {
-                                        Color32::WHITE
-                                    } else {
-                                        Color32::from_rgb(180, 185, 200)
-                                    })
+                                    .color(label_color)
                                     .size(13.0)
                                     .strong();
                                 if ui.link(label_text).clicked() {
                                     action = Some(SidebarAction::SelectWorkspace(idx));
+                                }
+
+                                if let Some(status) = meta.status {
+                                    ui.label(
+                                        egui::RichText::new(status.icon())
+                                            .size(11.0)
+                                            .color(Color32::from_rgb(180, 185, 200)),
+                                    );
+                                }
+
+                                if has_unread {
+                                    ui.label(
+                                        egui::RichText::new(format!("[{}]", meta.unread_count))
+                                            .size(11.0)
+                                            .color(Color32::from_rgb(245, 175, 45))
+                                            .strong(),
+                                    );
                                 }
 
                                 if let Some(branch) = &ws.git_branch {
@@ -116,6 +158,14 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                                     .size(10.0)
                                     .color(Color32::from_rgb(110, 115, 130)),
                             );
+
+                            if let Some(snippet) = &meta.latest_snippet {
+                                ui.label(
+                                    egui::RichText::new(format!("⚠ {}", snippet))
+                                        .size(10.0)
+                                        .color(Color32::from_rgb(245, 175, 45)),
+                                );
+                            }
                         }
                     });
 
