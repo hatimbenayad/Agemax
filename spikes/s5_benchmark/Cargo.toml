@@ -1,0 +1,9 @@
+[package]
+name = "spike-s5-benchmark"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+alacritty_terminal = "0.24"

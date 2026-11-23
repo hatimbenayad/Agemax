@@ -1,0 +1,25 @@
+[package]
+name = "agemax-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agemax-core = { path = "../agemax-core" }
+agemax-term = { path = "../agemax-term" }
+agemax-agy = { path = "../agemax-agy" }
+agemax-ipc = { path = "../agemax-ipc" }
+agemax-config = { path = "../agemax-config" }
+eframe.workspace = true
+egui.workspace = true
+parking_lot.workspace = true
+crossbeam-channel.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
