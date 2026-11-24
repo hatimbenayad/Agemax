@@ -62,11 +62,24 @@ fn test_coalescer_batching() {
 #[test]
 fn test_job_object_lifecycle() {
     use agemax_term::job_object::JobObject;
+    use std::process::Command;
+
     let job = JobObject::create().expect("Failed to create Job Object");
-    let current_pid = std::process::id();
-    // Assigning current process or child process to job
-    let res = job.assign_pid(current_pid);
-    // Note: If running inside some test harness already in a job with no breakaway, this might return an expected OS code,
-    // but the call itself must be valid Win32.
+    let mut child = Command::new("powershell")
+        .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+        .spawn()
+        .expect("Failed to spawn child process");
+
+    let res = job.assign_pid(child.id());
     println!("Job object assign pid result: {:?}", res);
+
+    if res.is_ok() {
+        // Dropping the JobObject with KILL_ON_JOB_CLOSE must terminate the child process tree.
+        drop(job);
+        let status = child.wait().expect("Failed waiting for terminated child");
+        println!("Child terminated on job close: {:?}", status);
+    } else {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }

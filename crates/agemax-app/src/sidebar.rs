@@ -19,7 +19,10 @@ pub struct SidebarProps<'a> {
 pub enum SidebarAction {
     SelectWorkspace(usize),
     CreateWorkspace,
+    RenameWorkspace(usize),
+    CloseWorkspace(usize),
     ToggleCollapse,
+    OpenViewSettings,
 }
 
 pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarAction> {
@@ -135,17 +138,33 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                                 }
 
                                 if let Some(branch) = &ws.git_branch {
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            ui.label(
-                                                egui::RichText::new(format!("⎇ {}", branch))
-                                                    .size(10.0)
-                                                    .color(Color32::from_rgb(110, 190, 140)),
-                                            );
-                                        },
+                                    ui.label(
+                                        egui::RichText::new(format!("⎇ {}", branch))
+                                            .size(10.0)
+                                            .color(Color32::from_rgb(110, 190, 140)),
                                     );
                                 }
+
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if props.workspaces.len() > 1
+                                            && ui
+                                                .small_button("×")
+                                                .on_hover_text("Close workspace")
+                                                .clicked()
+                                        {
+                                            action = Some(SidebarAction::CloseWorkspace(idx));
+                                        }
+                                        if ui
+                                            .small_button("✎")
+                                            .on_hover_text("Rename workspace")
+                                            .clicked()
+                                        {
+                                            action = Some(SidebarAction::RenameWorkspace(idx));
+                                        }
+                                    },
+                                );
                             });
 
                             let folder_name = ws
@@ -172,14 +191,33 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                     ui.add_space(2.0);
                 }
 
-                // Add Workspace Button
+                // Add Workspace & View Settings controls
                 ui.add_space(8.0);
                 if !props.is_collapsed {
-                    if ui.button("+ New Workspace").clicked() {
+                    ui.horizontal(|ui| {
+                        if ui.button("+ New Workspace").clicked() {
+                            action = Some(SidebarAction::CreateWorkspace);
+                        }
+                    });
+                    ui.add_space(6.0);
+                    if ui
+                        .small_button("⚙ View & Shortcuts")
+                        .on_hover_text("Switch Guided/Minimal mode or inspect shortcuts")
+                        .clicked()
+                    {
+                        action = Some(SidebarAction::OpenViewSettings);
+                    }
+                } else {
+                    if ui.button("+").on_hover_text("New Workspace").clicked() {
                         action = Some(SidebarAction::CreateWorkspace);
                     }
-                } else if ui.button("+").clicked() {
-                    action = Some(SidebarAction::CreateWorkspace);
+                    if ui
+                        .small_button("⚙")
+                        .on_hover_text("View & Shortcuts")
+                        .clicked()
+                    {
+                        action = Some(SidebarAction::OpenViewSettings);
+                    }
                 }
             });
         });

@@ -1,8 +1,10 @@
+use agemax_config::keybindings::KeybindingsConfig;
 use agemax_config::schema::CustomCommand;
-use eframe::egui::{self, Color32, Key, Pos2, Rect, Stroke, Vec2};
+use eframe::egui::{self, Color32, Key, Pos2, Rect, Sense, Stroke, Vec2};
 
 #[derive(Debug, Clone)]
 pub enum PaletteAction {
+    NewTab,
     SplitRight,
     SplitDown,
     ClosePane,
@@ -11,6 +13,9 @@ pub enum PaletteAction {
     JumpUnread,
     ToggleNotifications,
     NewWorkspace,
+    LaunchAgy,
+    ToggleUiMode,
+    OpenViewSettings,
     Custom(CustomCommand),
 }
 
@@ -38,63 +43,102 @@ impl Default for CommandPalette {
 
 impl CommandPalette {
     pub fn new() -> Self {
-        let items = vec![
+        let mut palette = Self {
+            is_open: false,
+            query: String::new(),
+            selected_index: 0,
+            items: Vec::new(),
+        };
+        palette.sync_builtins(&KeybindingsConfig::default());
+        palette
+    }
+
+    /// Refresh built-in items using the active keybindings while preserving custom commands.
+    pub fn sync_builtins(&mut self, kb: &KeybindingsConfig) {
+        let custom: Vec<PaletteItem> = self
+            .items
+            .iter()
+            .filter(|i| matches!(i.action, PaletteAction::Custom(_)))
+            .cloned()
+            .collect();
+
+        let mut items = vec![
+            PaletteItem {
+                title: "Start Antigravity Agent (agy)".to_string(),
+                description: Some("Launch agy in active pane".to_string()),
+                category: "Agent",
+                action: PaletteAction::LaunchAgy,
+            },
+            PaletteItem {
+                title: "Create New Workspace".to_string(),
+                description: Some("Pick folder & name".to_string()),
+                category: "Workspace",
+                action: PaletteAction::NewWorkspace,
+            },
+            PaletteItem {
+                title: "New Terminal Tab".to_string(),
+                description: Some(kb.new_tab.clone()),
+                category: "Tab",
+                action: PaletteAction::NewTab,
+            },
             PaletteItem {
                 title: "Split Pane Right".to_string(),
-                description: Some("Ctrl+Shift+D".to_string()),
+                description: Some(kb.split_horizontal.clone()),
                 category: "Pane",
                 action: PaletteAction::SplitRight,
             },
             PaletteItem {
                 title: "Split Pane Down".to_string(),
-                description: Some("Ctrl+Shift+R".to_string()),
+                description: Some(kb.split_vertical.clone()),
                 category: "Pane",
                 action: PaletteAction::SplitDown,
             },
             PaletteItem {
                 title: "Close Focused Pane".to_string(),
-                description: Some("Ctrl+Shift+W".to_string()),
+                description: Some(kb.close_pane.clone()),
                 category: "Pane",
                 action: PaletteAction::ClosePane,
             },
             PaletteItem {
                 title: "Toggle Zoom Pane".to_string(),
-                description: Some("Ctrl+Shift+Enter".to_string()),
+                description: Some(kb.zoom_pane.clone()),
                 category: "Pane",
                 action: PaletteAction::ToggleZoom,
             },
             PaletteItem {
                 title: "Toggle Workspace Sidebar".to_string(),
-                description: Some("Ctrl+B".to_string()),
+                description: Some(kb.toggle_sidebar.clone()),
                 category: "View",
                 action: PaletteAction::ToggleSidebar,
             },
             PaletteItem {
+                title: "Switch UI Mode (Guided / Minimal)".to_string(),
+                description: Some("Toggle toolbar & pane buttons".to_string()),
+                category: "View",
+                action: PaletteAction::ToggleUiMode,
+            },
+            PaletteItem {
+                title: "Open View & Shortcuts Settings".to_string(),
+                description: None,
+                category: "View",
+                action: PaletteAction::OpenViewSettings,
+            },
+            PaletteItem {
                 title: "Jump to Oldest Unread Waiting Pane".to_string(),
-                description: Some("Ctrl+Shift+U".to_string()),
+                description: Some(kb.jump_unread.clone()),
                 category: "Attention",
                 action: PaletteAction::JumpUnread,
             },
             PaletteItem {
                 title: "Toggle Notification Panel".to_string(),
-                description: Some("Ctrl+Shift+N".to_string()),
+                description: Some(kb.toggle_notifications.clone()),
                 category: "Attention",
                 action: PaletteAction::ToggleNotifications,
             },
-            PaletteItem {
-                title: "Create New Workspace".to_string(),
-                description: None,
-                category: "Workspace",
-                action: PaletteAction::NewWorkspace,
-            },
         ];
 
-        Self {
-            is_open: false,
-            query: String::new(),
-            selected_index: 0,
-            items,
-        }
+        items.extend(custom);
+        self.items = items;
     }
 
     pub fn set_custom_commands(&mut self, commands: &[CustomCommand]) {
@@ -241,37 +285,46 @@ impl CommandPalette {
                                     .corner_radius(4.0)
                                     .inner_margin(6.0);
 
-                                frame.show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            egui::RichText::new(&item.title)
-                                                .size(13.0)
-                                                .color(Color32::from_rgb(230, 235, 245))
-                                                .strong(),
-                                        );
+                                let row_resp = frame
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                egui::RichText::new(&item.title)
+                                                    .size(13.0)
+                                                    .color(Color32::from_rgb(230, 235, 245))
+                                                    .strong(),
+                                            );
 
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if let Some(desc) = &item.description {
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    if let Some(desc) = &item.description {
+                                                        ui.label(
+                                                            egui::RichText::new(desc)
+                                                                .size(11.0)
+                                                                .color(Color32::from_rgb(
+                                                                    140, 150, 175,
+                                                                )),
+                                                        );
+                                                    }
                                                     ui.label(
-                                                        egui::RichText::new(desc).size(11.0).color(
-                                                            Color32::from_rgb(140, 150, 175),
-                                                        ),
+                                                        egui::RichText::new(format!(
+                                                            "[{}]",
+                                                            item.category
+                                                        ))
+                                                        .size(10.0)
+                                                        .color(Color32::from_rgb(100, 110, 130)),
                                                     );
-                                                }
-                                                ui.label(
-                                                    egui::RichText::new(format!(
-                                                        "[{}]",
-                                                        item.category
-                                                    ))
-                                                    .size(10.0)
-                                                    .color(Color32::from_rgb(100, 110, 130)),
-                                                );
-                                            },
-                                        );
-                                    });
-                                });
+                                                },
+                                            );
+                                        });
+                                    })
+                                    .response
+                                    .interact(Sense::click());
+
+                                if row_resp.clicked() {
+                                    executed_action = Some(item.action.clone());
+                                }
 
                                 ui.add_space(2.0);
                             }
@@ -279,6 +332,9 @@ impl CommandPalette {
                 });
             });
 
+        if executed_action.is_some() {
+            self.close();
+        }
         executed_action
     }
 }

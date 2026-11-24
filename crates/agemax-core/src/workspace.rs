@@ -29,6 +29,17 @@ impl Tab {
             self.zoomed_pane = Some(self.active_pane);
         }
     }
+
+    /// Rename the tab if the trimmed title is non-empty.
+    pub fn rename(&mut self, title: impl Into<String>) -> bool {
+        let candidate = title.into();
+        if let Some(clean) = normalize_label(&candidate) {
+            self.title = clean;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -68,5 +79,25 @@ impl Workspace {
 
     pub fn active_pane_id(&self) -> Option<PaneId> {
         self.active_tab().map(|t| t.active_pane)
+    }
+
+    /// Rename the workspace if the trimmed name is non-empty.
+    pub fn rename(&mut self, name: impl Into<String>) -> bool {
+        let candidate = name.into();
+        if let Some(clean) = normalize_label(&candidate) {
+            self.name = clean;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn normalize_label(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }

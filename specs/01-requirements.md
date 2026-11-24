@@ -118,3 +118,31 @@ This document specifies the testable requirements for **Age Max**. Every require
 - **REQ-061**: CPU utilization of the multiplexer process MUST be under 1.0% when all hosted terminal sessions are idle.
 - **REQ-062**: The codebase MUST compile cleanly on the stable Rust toolchain (2021 edition) with zero warnings under `cargo clippy --all-targets --all-features -- -D warnings`.
 - **REQ-063**: All external dependencies MUST be checked and approved by `cargo-deny` under permissive licenses (`MIT`, `Apache-2.0`, `BSD-2-Clause`, `BSD-3-Clause`, `ISC`).
+
+---
+
+## 9. Accessibility, Guided UX & Windows Desktop Polish (Units 8–11)
+
+### Unit 8: UI Modes, Button-First Chrome & Workspace Ergonomics
+- **REQ-064**: Release builds of `agemax-app.exe` MUST use the Windows GUI subsystem (`windows_subsystem = "windows"`) so launching from Desktop/Explorer does not open a secondary black debug console window.
+- **REQ-065**: `AgeMaxConfig` MUST support a user-selectable `ui_mode` (`"guided"` or `"minimal"`) plus optional overrides (`show_toolbar`, `show_pane_headers`, `show_shortcut_hints`) persisted in `config.toml`, allowing non-technical users to use visible mouse buttons while allowing power users to keep the distraction-free minimal view.
+- **REQ-066**: In `guided` mode, the UI MUST render a Top Utility Toolbar (`+ Workspace`, `Split Right`, `Split Down`, `Launch agy`, `Actions`, `Alerts`, `? Shortcuts`, `Minimal/Guided` switch) and compact per-pane headers showing plain-English status pills and quick action buttons.
+- **REQ-067**: Keybinding handling in `agemax-app` MUST bind dynamically to `KeybindingsConfig` (including `new_tab` defaulting to `Ctrl+Shift+T` while preserving `split_vertical: "Ctrl+Shift+R"` and existing shortcuts), and users MUST be able to view/switch presets without breaking muscle memory.
+- **REQ-068**: Creating a Workspace via the UI MUST support picking a directory using a native Windows Folder Picker dialog (`IFileOpenDialog`), naming the workspace, and optionally launching `agy` cleanly inside it.
+- **REQ-069**: Users MUST be able to rename and close Workspaces and rename Tabs directly from the UI using mouse interactions.
+
+### Unit 9: Mouse Ergonomics, Live Theming & Startup Session Restore
+- **REQ-070**: The terminal surface MUST support mouse wheel scrollback navigation, visual scroll position feedback, click-and-drag text selection, `Ctrl+Shift+C` copy, a right-click context menu (*Copy*, *Paste*, *Clear*, *Split*), and `Ctrl+Click` URL/OSC 8 link activation.
+- **REQ-071**: Split pane borders MUST support drag-to-resize with the mouse, and terminal text MUST support live font zoom (`Ctrl++`, `Ctrl+-`, `Ctrl+0`, `Ctrl+Wheel`).
+- **REQ-072**: `AgeMaxApp` MUST apply `ThemeConfig` and `GeneralConfig.font_size` live from `config.toml` (with hot reload) across backgrounds, text, borders, and attention rings.
+- **REQ-073**: On startup, if `%LOCALAPPDATA%\AgeMax\session.json` exists, the UI MUST offer a safe non-blocking restore prompt to rebuild prior workspaces and one-click resume `agy --conversation <id>` without auto-executing unapproved commands.
+- **REQ-074**: When a pane's child shell/agent exits, the pane MUST offer a clear inline exit banner with one-click `[Restart]`, `[Resume Agent]`, and `[Close]` actions.
+
+### Unit 10: Zero-CLI Onboarding, Visual Agent Presets & Settings UI
+- **REQ-075**: On first launch (or when `agy.exe` is missing), the UI MUST run `AntigravityAdapter::detect_binary()` asynchronously and display a non-blocking setup card with the official install guide and re-check button.
+- **REQ-076**: The UI MUST offer an "Agent Launcher" modal with plain-English presets (*New Session*, *Safe Plan Mode* via `--mode plan`, *Continue Last* via `-c`, *Select Profile*) without reading credentials.
+- **REQ-077**: The UI MUST provide a visual Settings modal (`⚙`) editing UI mode, theme presets, font size, default shell, notification preferences, keybindings, and custom quick commands, writing changes atomically to `config.toml`.
+
+### Unit 11: Windows Packaging & Single-Instance Activation
+- **REQ-078**: Release builds MUST embed an application icon (`.ico`), offer a Windows installer / portable release package, and support optional Explorer "Open Folder in Age Max" integration.
+- **REQ-079**: Launching `agemax-app.exe` when an instance already owns `\\.\pipe\agemax-<username>` MUST forward focus/directory arguments to the running window over IPC instead of failing or colliding on the named pipe.
