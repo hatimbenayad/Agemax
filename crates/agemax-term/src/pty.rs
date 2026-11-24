@@ -106,6 +106,7 @@ pub struct PtyInstance {
     job_object: Arc<JobObject>,
     child_pid: Option<u32>,
     exit_signal: Arc<AtomicBool>,
+    reader_exited: Arc<AtomicBool>,
 }
 
 impl PtyInstance {
@@ -187,7 +188,9 @@ impl PtyInstance {
 
         let (mut coalescer, rx) = PtyCoalescer::new(Duration::from_millis(4));
         let exit_signal = Arc::new(AtomicBool::new(false));
+        let reader_exited = Arc::new(AtomicBool::new(false));
         let exit_clone = exit_signal.clone();
+        let reader_exited_clone = reader_exited.clone();
 
         // Background reader thread: blocks on PTY stream and feeds coalescer
         thread::Builder::new()
@@ -204,6 +207,7 @@ impl PtyInstance {
                     }
                 }
                 coalescer.flush();
+                reader_exited_clone.store(true, Ordering::Release);
             })
             .map_err(|e| PtyError::SpawnFailed(format!("Failed to spawn reader thread: {}", e)))?;
 
@@ -213,6 +217,7 @@ impl PtyInstance {
             job_object,
             child_pid,
             exit_signal,
+            reader_exited,
         };
 
         Ok((instance, rx))
@@ -236,6 +241,10 @@ impl PtyInstance {
 
     pub fn child_pid(&self) -> Option<u32> {
         self.child_pid
+    }
+
+    pub fn has_exited(&self) -> bool {
+        self.reader_exited.load(Ordering::Acquire)
     }
 
     pub fn job_object(&self) -> &Arc<JobObject> {

@@ -1,9 +1,18 @@
 use alacritty_terminal::event::{Event, EventListener};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::{Config, Term};
-use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, StdSyncHandler};
+use alacritty_terminal::vte::ansi::{
+    ClearMode, Color, Handler, NamedColor, Processor, StdSyncHandler,
+};
+
+/// Logical grid coordinate anchored to scrollback history (`Line(0)` = live top row; negative = scrollback).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct GridPoint {
+    pub line: i32,
+    pub col: usize,
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct TerminalGridConfig {
@@ -112,7 +121,44 @@ impl TerminalGrid {
         (point.line.0 as usize, point.column.0)
     }
 
+    pub fn display_offset(&self) -> usize {
+        self.term.grid().display_offset()
+    }
+
+    pub fn history_size(&self) -> usize {
+        self.term.grid().history_size()
+    }
+
+    pub fn scroll_delta(&mut self, delta: i32) {
+        self.term.scroll_display(Scroll::Delta(delta));
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        self.term.scroll_display(Scroll::Bottom);
+    }
+
+    pub fn clear_screen(&mut self) {
+        self.term.clear_screen(ClearMode::All);
+        self.term.scroll_display(Scroll::Bottom);
+    }
+
+    /// Translate a viewport row (`0..rows`) into an absolute `alacritty_terminal` grid line index.
+    pub fn viewport_to_grid_line(&self, viewport_row: usize) -> i32 {
+        viewport_row as i32 - self.display_offset() as i32
+    }
+
     pub fn get_cell(&self, row: usize, col: usize) -> RenderCell {
+        self.get_cell_for_theme(row, col, (16, 18, 26), (220, 224, 235))
+    }
+
+    /// Fetch a cell adjusted for scrollback offset and contrast-protected against the active theme colors.
+    pub fn get_cell_for_theme(
+        &self,
+        row: usize,
+        col: usize,
+        default_bg: (u8, u8, u8),
+        default_fg: (u8, u8, u8),
+    ) -> RenderCell {
         if row >= self.rows || col >= self.cols {
             return RenderCell {
                 c: ' ',
@@ -125,7 +171,8 @@ impl TerminalGrid {
         }
 
         let grid = self.term.grid();
-        let cell: &Cell = &grid[Line(row as i32)][Column(col)];
+        let line_idx = row as i32 - grid.display_offset() as i32;
+        let cell: &Cell = &grid[Line(line_idx)][Column(col)];
         let c = cell.c;
         let mut fg = convert_color(cell.fg);
         let mut bg = convert_color(cell.bg);
@@ -135,39 +182,35 @@ impl TerminalGrid {
             std::mem::swap(&mut fg, &mut bg);
             if fg.is_none() {
                 fg = Some(CellRgb {
-                    r: 16,
-                    g: 18,
-                    b: 26,
+                    r: default_bg.0,
+                    g: default_bg.1,
+                    b: default_bg.2,
                 });
             }
             if bg.is_none() {
                 bg = Some(CellRgb {
-                    r: 220,
-                    g: 224,
-                    b: 235,
+                    r: default_fg.0,
+                    g: default_fg.1,
+                    b: default_fg.2,
                 });
             }
         }
 
         // Contrast guarantee: ensure foreground is always clearly readable against background
         if let Some(ref mut fg_rgb) = fg {
-            let fg_lum =
-                (fg_rgb.r as u32 * 299 + fg_rgb.g as u32 * 587 + fg_rgb.b as u32 * 114) / 1000;
+            let fg_lum = luminance(fg_rgb.r, fg_rgb.g, fg_rgb.b);
             let bg_lum = if let Some(ref bg_rgb) = bg {
-                (bg_rgb.r as u32 * 299 + bg_rgb.g as u32 * 587 + bg_rgb.b as u32 * 114) / 1000
+                luminance(bg_rgb.r, bg_rgb.g, bg_rgb.b)
             } else {
-                18 // default dark pane background
+                luminance(default_bg.0, default_bg.1, default_bg.2)
             };
 
-            // If contrast difference is too low (< 45), boost or adjust foreground
             if fg_lum.abs_diff(bg_lum) < 45 {
                 if bg_lum < 128 {
-                    // Dark background: boost foreground to crisp readable light gray
                     fg_rgb.r = 220;
                     fg_rgb.g = 224;
                     fg_rgb.b = 235;
                 } else {
-                    // Light background: darken foreground to high-contrast dark slate
                     fg_rgb.r = 20;
                     fg_rgb.g = 22;
                     fg_rgb.b = 30;
@@ -189,13 +232,89 @@ impl TerminalGrid {
         if row >= self.rows {
             return String::new();
         }
+        self.render_grid_line_text(row as i32)
+    }
+
+    /// Render the line currently shown at `viewport_row`, accounting for active scrollback offset.
+    pub fn render_viewport_line_text(&self, viewport_row: usize) -> String {
+        if viewport_row >= self.rows {
+            return String::new();
+        }
+        let line_idx = self.viewport_to_grid_line(viewport_row);
+        self.render_grid_line_text(line_idx)
+    }
+
+    fn render_grid_line_text(&self, line_idx: i32) -> String {
+        let min_line = -(self.history_size() as i32);
+        let max_line = self.rows as i32 - 1;
+        if line_idx < min_line || line_idx > max_line {
+            return String::new();
+        }
         let grid = self.term.grid();
-        let row_line = &grid[Line(row as i32)];
+        let row_line = &grid[Line(line_idx)];
         let mut s = String::with_capacity(self.cols);
         for col in 0..self.cols {
-            s.push(row_line[Column(col)].c);
+            let ch = row_line[Column(col)].c;
+            s.push(if ch == '\0' { ' ' } else { ch });
         }
         s
+    }
+
+    /// Extract clean, right-trimmed multi-line text between two logical grid coordinates.
+    pub fn extract_selection_text(&self, start: GridPoint, end: GridPoint) -> String {
+        let (a, b) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        if self.cols == 0 || self.rows == 0 {
+            return String::new();
+        }
+        let min_line = -(self.history_size() as i32);
+        let max_line = self.rows as i32 - 1;
+        let line_start = a.line.clamp(min_line, max_line);
+        let line_end = b.line.clamp(min_line, max_line);
+        if line_start > line_end {
+            return String::new();
+        }
+
+        let mut lines_out = Vec::new();
+        for line in line_start..=line_end {
+            let row_str = self.render_grid_line_text(line);
+            let chars: Vec<char> = row_str.chars().collect();
+            let c_start = if line == a.line {
+                a.col.min(chars.len().saturating_sub(1))
+            } else {
+                0
+            };
+            let c_end = if line == b.line {
+                b.col.min(chars.len().saturating_sub(1))
+            } else {
+                chars.len().saturating_sub(1)
+            };
+            if c_start <= c_end && c_start < chars.len() {
+                let slice: String = chars[c_start..=c_end].iter().collect();
+                lines_out.push(slice.trim_end().to_string());
+            } else {
+                lines_out.push(String::new());
+            }
+        }
+        lines_out.join("\n")
+    }
+
+    /// Resolve any OSC 8 hyperlink or plain HTTP/HTTPS URL at a given viewport cell.
+    pub fn url_at(&self, viewport_row: usize, col: usize) -> Option<String> {
+        if viewport_row >= self.rows || col >= self.cols {
+            return None;
+        }
+        let line_idx = self.viewport_to_grid_line(viewport_row);
+        let grid = self.term.grid();
+        if let Some(link) = grid[Line(line_idx)][Column(col)].hyperlink() {
+            return Some(link.uri().to_string());
+        }
+
+        let line = self.render_grid_line_text(line_idx);
+        find_http_url_at_col(&line, col)
     }
 
     pub fn term(&self) -> &Term<NullEventListener> {
@@ -205,6 +324,39 @@ impl TerminalGrid {
     pub fn term_mut(&mut self) -> &mut Term<NullEventListener> {
         &mut self.term
     }
+}
+
+fn luminance(r: u8, g: u8, b: u8) -> u32 {
+    (r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000
+}
+
+fn find_http_url_at_col(line: &str, col: usize) -> Option<String> {
+    let mut search_from = 0;
+    while let Some(rel) = line[search_from..]
+        .find("https://")
+        .or_else(|| line[search_from..].find("http://"))
+    {
+        let abs_start = search_from + rel;
+        let tail = &line[abs_start..];
+        let raw_end = tail
+            .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\''))
+            .map(|len| abs_start + len)
+            .unwrap_or(line.len());
+
+        let clean_slice =
+            line[abs_start..raw_end].trim_end_matches(['.', ',', ';', ':', ')', ']', '!']);
+        let char_start = line[..abs_start].chars().count();
+        let char_len = clean_slice.chars().count();
+
+        if col >= char_start && col < char_start + char_len && !clean_slice.is_empty() {
+            return Some(clean_slice.to_string());
+        }
+        search_from = raw_end.max(abs_start + 7);
+        if search_from >= line.len() {
+            break;
+        }
+    }
+    None
 }
 
 pub fn indexed_to_rgb(idx: u8) -> (u8, u8, u8) {

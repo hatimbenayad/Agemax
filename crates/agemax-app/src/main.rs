@@ -4,6 +4,7 @@ mod chrome_ui;
 mod command_palette;
 mod folder_picker;
 mod ipc_bridge;
+mod mouse_ux;
 mod notification_win;
 mod sidebar;
 mod tab_bar;
@@ -14,7 +15,7 @@ use agemax_agy::profile::ProfileManager;
 use agemax_config::hot_reload::ConfigWatcher;
 use agemax_config::keybindings::{KeyChord, KeyCode};
 use agemax_config::schema::{AgeMaxConfig, UiMode};
-use agemax_core::layout::{Direction, PaneId, SplitDirection, WorkspaceId};
+use agemax_core::layout::{Direction, LayoutTree, PaneId, SplitDirection, WorkspaceId};
 use agemax_core::model::{Point, Rect as CoreRect, TerminalSize};
 use agemax_core::notification::NotificationStore;
 use agemax_core::session::{
@@ -25,6 +26,7 @@ use agemax_core::workspace::{Tab, Workspace};
 use agemax_term::metadata::detect_git_branch;
 use agemax_term::pty::{detect_default_shell, PtyConfig};
 use agemax_term::surface::TerminalSurface;
+use agemax_term::vt::GridPoint;
 use chrome_ui::{
     render_pane_header, render_top_toolbar, NewWorkspaceModal, PaneHeaderAction, PaneHeaderProps,
     RenameModal, RenameTarget, ToolbarAction, ViewSettingsModal,
@@ -32,6 +34,11 @@ use chrome_ui::{
 use command_palette::{CommandPalette, PaletteAction};
 use eframe::egui::{self, Color32, FontId, Key, Pos2, Rect, Stroke, StrokeKind, Vec2};
 use ipc_bridge::{start_ipc_server, IpcAppCommand};
+use mouse_ux::{
+    color32_from_rgb, render_context_menu, render_pane_exit_banner, render_session_restore_banner,
+    viewport_cell_at_pos, ActiveSplitDrag, ContextMenuAction, ContextMenuState, ExitBannerAction,
+    SessionRestoreAction, TextSelection,
+};
 use notification_win::{NotificationService, PlatformNotificationService};
 use sidebar::{render_sidebar, SidebarAction, SidebarProps, SidebarWorkspaceMeta};
 use std::collections::HashMap;
@@ -107,6 +114,11 @@ pub struct AgeMaxApp {
     new_workspace_modal: NewWorkspaceModal,
     rename_modal: RenameModal,
     view_settings_modal: ViewSettingsModal,
+    pending_restore: Option<SessionSnapshot>,
+    text_selection: Option<TextSelection>,
+    active_split_drag: Option<ActiveSplitDrag>,
+    context_menu: ContextMenuState,
+    last_light_visuals: Option<bool>,
     show_notifications_panel: bool,
     is_sidebar_collapsed: bool,
     font_size: f32,
@@ -158,6 +170,9 @@ impl AgeMaxApp {
         command_palette.set_custom_commands(&config.commands);
 
         let initial_font_size = config.general.font_size.clamp(9.0, 32.0);
+        let pending_restore = SessionSnapshot::load_from_file(&SessionSnapshot::default_path())
+            .ok()
+            .filter(|snap| !snap.workspaces.is_empty());
 
         Self {
             workspaces: vec![initial_workspace],
@@ -175,6 +190,11 @@ impl AgeMaxApp {
             new_workspace_modal: NewWorkspaceModal::new(),
             rename_modal: RenameModal::default(),
             view_settings_modal: ViewSettingsModal::default(),
+            pending_restore,
+            text_selection: None,
+            active_split_drag: None,
+            context_menu: ContextMenuState::default(),
+            last_light_visuals: None,
             show_notifications_panel: false,
             is_sidebar_collapsed: false,
             font_size: initial_font_size,
@@ -190,6 +210,197 @@ impl AgeMaxApp {
             || self.new_workspace_modal.is_open
             || self.rename_modal.is_open
             || self.view_settings_modal.is_open
+    }
+
+    fn copy_selection_to_clipboard(
+        &self,
+        ctx: &egui::Context,
+        target_pane: Option<PaneId>,
+    ) -> bool {
+        let Some(sel) = self.text_selection else {
+            return false;
+        };
+        if !sel.is_non_empty() {
+            return false;
+        }
+        if let Some(pid) = target_pane {
+            if sel.pane_id != pid {
+                return false;
+            }
+        }
+        let Some(surface) = self.surfaces.get(&sel.pane_id) else {
+            return false;
+        };
+        let text = surface.extract_selection_text(sel.anchor, sel.end);
+        if text.is_empty() {
+            return false;
+        }
+        ctx.copy_text(text);
+        true
+    }
+
+    fn adjust_font_zoom(&mut self, delta: f32) {
+        let next = (self.font_size + delta).clamp(9.0, 32.0);
+        if (next - self.font_size).abs() > 0.1 {
+            self.font_size = next;
+            self.config.general.font_size = next;
+            let _ = self.config.save_default();
+        }
+    }
+
+    fn restart_pane_shell(&mut self, pane_id: PaneId) -> bool {
+        let cwd = self
+            .find_workspace_for_pane(pane_id)
+            .and_then(|ws_id| self.workspaces.iter().find(|w| w.id == ws_id))
+            .map(|w| w.cwd.clone())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+        let size = self
+            .surfaces
+            .get(&pane_id)
+            .map(|s| TerminalSize::new(s.cols() as u16, s.rows() as u16))
+            .unwrap_or_else(|| TerminalSize::new(80, 24));
+
+        if let Ok(fresh) = spawn_terminal_surface(size, &cwd) {
+            self.surfaces.insert(pane_id, fresh);
+            self.osc_parsers.insert(pane_id, OscParser::new());
+            self.pane_status.insert(pane_id, AgentStatus::Idle);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn resume_agent_in_pane(&mut self, pane_id: PaneId) {
+        if self
+            .surfaces
+            .get(&pane_id)
+            .map(|s| s.has_exited())
+            .unwrap_or(false)
+        {
+            self.restart_pane_shell(pane_id);
+        }
+        let Some(conv_id) = self.agent_conversation_ids.get(&pane_id).cloned() else {
+            self.launch_agy_in_pane(pane_id);
+            return;
+        };
+        if !is_safe_conversation_id(&conv_id) {
+            return;
+        }
+        if let Some(surface) = self.surfaces.get_mut(&pane_id) {
+            let cmd = format!("agy --conversation {}\r", conv_id);
+            let _ = surface.send_input(cmd.as_bytes());
+        }
+    }
+
+    fn restore_session_snapshot(&mut self, snapshot: SessionSnapshot, auto_resume_agents: bool) {
+        let fallback_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let mut restored_workspaces = Vec::new();
+        let mut new_surfaces = HashMap::new();
+        let mut new_parsers = HashMap::new();
+        let mut new_statuses = HashMap::new();
+        let mut new_conv_ids = HashMap::new();
+        let mut resume_targets = Vec::new();
+
+        for ws_snap in snapshot.workspaces {
+            let ws_dir = if ws_snap.cwd.exists() {
+                ws_snap.cwd.clone()
+            } else {
+                fallback_dir.clone()
+            };
+            let mut tabs = Vec::new();
+            for tab_snap in ws_snap.tabs {
+                let mut layout = LayoutTree::from(&tab_snap.layout);
+                let mut active_pane = PaneId(tab_snap.active_pane_id);
+                let pane_ids = layout.panes();
+
+                if pane_ids.is_empty() {
+                    let pid = PaneId::new();
+                    layout = LayoutTree::new_leaf(pid);
+                    active_pane = pid;
+                    if let Ok(surf) = spawn_terminal_surface(TerminalSize::new(80, 24), &ws_dir) {
+                        new_surfaces.insert(pid, surf);
+                        new_parsers.insert(pid, OscParser::new());
+                        new_statuses.insert(pid, AgentStatus::Idle);
+                    }
+                } else {
+                    for pid in &pane_ids {
+                        let pane_snap = tab_snap.panes.iter().find(|p| p.id == pid.0);
+                        let p_dir = pane_snap
+                            .map(|p| p.cwd.clone())
+                            .filter(|d| d.exists())
+                            .unwrap_or_else(|| ws_dir.clone());
+                        if let Ok(surf) = spawn_terminal_surface(TerminalSize::new(80, 24), &p_dir)
+                        {
+                            new_surfaces.insert(*pid, surf);
+                            new_parsers.insert(*pid, OscParser::new());
+                            new_statuses.insert(*pid, AgentStatus::Idle);
+                            if let Some(cid) =
+                                pane_snap.and_then(|p| p.agent_conversation_id.clone())
+                            {
+                                new_conv_ids.insert(*pid, cid);
+                                if auto_resume_agents {
+                                    resume_targets.push(*pid);
+                                }
+                            }
+                        }
+                    }
+                    if !pane_ids.contains(&active_pane) {
+                        active_pane = pane_ids[0];
+                    }
+                }
+
+                tabs.push(Tab {
+                    id: agemax_core::layout::TabId::new(),
+                    title: tab_snap.name,
+                    layout,
+                    active_pane,
+                    zoomed_pane: None,
+                });
+            }
+
+            if tabs.is_empty() {
+                let pid = PaneId::new();
+                tabs.push(Tab::new("Terminal 1", pid));
+                if let Ok(surf) = spawn_terminal_surface(TerminalSize::new(80, 24), &ws_dir) {
+                    new_surfaces.insert(pid, surf);
+                    new_parsers.insert(pid, OscParser::new());
+                    new_statuses.insert(pid, AgentStatus::Idle);
+                }
+            }
+
+            let active_tab_index = ws_snap.active_tab_index.min(tabs.len().saturating_sub(1));
+            restored_workspaces.push(Workspace {
+                id: WorkspaceId(ws_snap.id),
+                name: ws_snap.name,
+                cwd: ws_dir.clone(),
+                git_branch: detect_git_branch(&ws_dir),
+                listening_ports: Vec::new(),
+                profile_label: ws_snap.profile,
+                tabs,
+                active_tab_index,
+            });
+        }
+
+        if restored_workspaces.is_empty() {
+            return;
+        }
+
+        self.workspaces = restored_workspaces;
+        self.active_workspace_index = snapshot
+            .active_workspace_index
+            .min(self.workspaces.len().saturating_sub(1));
+        self.surfaces = new_surfaces;
+        self.osc_parsers = new_parsers;
+        self.pane_status = new_statuses;
+        self.agent_conversation_ids = new_conv_ids;
+        self.pending_restore = None;
+        self.text_selection = None;
+
+        for pid in resume_targets {
+            self.resume_agent_in_pane(pid);
+        }
+        self.save_session();
     }
 
     fn open_new_workspace_modal(&mut self) {
@@ -352,7 +563,30 @@ impl AgeMaxApp {
         None
     }
 
-    pub fn save_session(&self) {
+    pub fn save_session(&mut self) {
+        if self.pending_restore.is_some() {
+            return;
+        }
+        // Best-effort conversation ID capture for active agent panes cleanly before writing snapshot
+        let adapter = AntigravityAdapter::new();
+        let mut captured = Vec::new();
+        for ws in &self.workspaces {
+            for tab in &ws.tabs {
+                for &pid in &tab.layout.panes() {
+                    if !self.agent_conversation_ids.contains_key(&pid)
+                        && self.pane_status.get(&pid) != Some(&AgentStatus::Idle)
+                    {
+                        if let Some(cid) = adapter.capture_conversation_id(&ws.cwd) {
+                            captured.push((pid, cid));
+                        }
+                    }
+                }
+            }
+        }
+        for (pid, cid) in captured {
+            self.agent_conversation_ids.insert(pid, cid);
+        }
+
         let ws_snapshots = self
             .workspaces
             .iter()
@@ -719,11 +953,12 @@ impl AgeMaxApp {
     }
 
     fn handle_input(&mut self, ctx: &egui::Context, content_rect: CoreRect) {
-        if self.is_modal_open() {
+        if self.is_modal_open() || self.context_menu.is_open {
             return;
         }
 
         let events = ctx.input(|i| i.events.clone());
+        let has_paste_event = events.iter().any(|e| matches!(e, egui::Event::Paste(_)));
         let focused_pane_id = self.active_pane_id();
 
         for event in events {
@@ -731,10 +966,12 @@ impl AgeMaxApp {
                 egui::Event::Text(text) => {
                     if let Some(id) = focused_pane_id {
                         self.notification_store.mark_pane_read(id);
+                        self.text_selection = None;
                         if self.pane_status.get(&id) == Some(&AgentStatus::WaitingForInput) {
                             self.pane_status.insert(id, AgentStatus::Working);
                         }
                         if let Some(surface) = self.surfaces.get_mut(&id) {
+                            surface.scroll_to_bottom();
                             let _ = surface.send_input(text.as_bytes());
                         }
                     }
@@ -745,6 +982,22 @@ impl AgeMaxApp {
                     modifiers,
                     ..
                 } => {
+                    // Font Zoom Shortcuts (Ctrl+Plus/Equals, Ctrl+Minus, Ctrl+0)
+                    if modifiers.ctrl && !modifiers.alt {
+                        if matches!(key, Key::Plus | Key::Equals) {
+                            self.adjust_font_zoom(1.0);
+                            continue;
+                        }
+                        if key == Key::Minus {
+                            self.adjust_font_zoom(-1.0);
+                            continue;
+                        }
+                        if !modifiers.shift && key == Key::Num0 {
+                            self.adjust_font_zoom(14.0 - self.font_size);
+                            continue;
+                        }
+                    }
+
                     // Configurable global shortcuts (dynamic from KeybindingsConfig):
                     let kb = &self.config.keybindings;
                     if self.matches_keybinding(&kb.toggle_sidebar, key, &modifiers) {
@@ -784,26 +1037,14 @@ impl AgeMaxApp {
                         continue;
                     }
 
+                    if modifiers.ctrl && modifiers.shift && key == Key::C {
+                        self.copy_selection_to_clipboard(ctx, focused_pane_id);
+                        continue;
+                    }
+
                     if modifiers.ctrl && modifiers.shift && key == Key::V {
-                        if let Some(clipboard) = ctx.input(|i| {
-                            i.events.iter().find_map(|e| {
-                                if let egui::Event::Paste(text) = e {
-                                    Some(text.clone())
-                                } else {
-                                    None
-                                }
-                            })
-                        }) {
-                            if let Some(id) = focused_pane_id {
-                                self.notification_store.mark_pane_read(id);
-                                if self.pane_status.get(&id) == Some(&AgentStatus::WaitingForInput)
-                                {
-                                    self.pane_status.insert(id, AgentStatus::Working);
-                                }
-                                if let Some(surface) = self.surfaces.get_mut(&id) {
-                                    let _ = surface.send_input(clipboard.as_bytes());
-                                }
-                            }
+                        if !has_paste_event {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
                         }
                         continue;
                     }
@@ -834,11 +1075,13 @@ impl AgeMaxApp {
                     // Forward keys to focused terminal surface
                     if let Some(id) = focused_pane_id {
                         self.notification_store.mark_pane_read(id);
+                        self.text_selection = None;
                         if self.pane_status.get(&id) == Some(&AgentStatus::WaitingForInput) {
                             self.pane_status.insert(id, AgentStatus::Working);
                         }
 
                         if let Some(surface) = self.surfaces.get_mut(&id) {
+                            surface.scroll_to_bottom();
                             if modifiers.ctrl && !modifiers.shift && !modifiers.alt {
                                 match key {
                                     Key::C => {
@@ -917,10 +1160,12 @@ impl AgeMaxApp {
                 egui::Event::Paste(text) => {
                     if let Some(id) = focused_pane_id {
                         self.notification_store.mark_pane_read(id);
+                        self.text_selection = None;
                         if self.pane_status.get(&id) == Some(&AgentStatus::WaitingForInput) {
                             self.pane_status.insert(id, AgentStatus::Working);
                         }
                         if let Some(surface) = self.surfaces.get_mut(&id) {
+                            surface.scroll_to_bottom();
                             let _ = surface.send_input(text.as_bytes());
                         }
                     }
@@ -1053,7 +1298,18 @@ impl eframe::App for AgeMaxApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let full_frame = egui::Frame::new().fill(Color32::from_rgb(15, 17, 23));
+        let resolved_theme = self.config.theme.resolved_rgb();
+        let is_light = resolved_theme.is_light_background();
+        if self.last_light_visuals != Some(is_light) {
+            ui.ctx().set_visuals(if is_light {
+                egui::Visuals::light()
+            } else {
+                egui::Visuals::dark()
+            });
+            self.last_light_visuals = Some(is_light);
+        }
+
+        let full_frame = egui::Frame::new().fill(color32_from_rgb(resolved_theme.background));
         full_frame.show(ui, |ui| {
             ui.horizontal(|ui| {
                 // Prepare sidebar metadata
@@ -1205,6 +1461,30 @@ impl eframe::App for AgeMaxApp {
                         }
                     }
 
+                    // Optional non-blocking startup session restore prompt
+                    let mut restore_decision = None;
+                    if let Some(ref snap) = self.pending_restore {
+                        restore_decision =
+                            render_session_restore_banner(ui, snap, &resolved_theme);
+                    }
+                    if let Some(decision) = restore_decision {
+                        match decision {
+                            SessionRestoreAction::RestoreWorkspacesOnly => {
+                                if let Some(snap) = self.pending_restore.take() {
+                                    self.restore_session_snapshot(snap, false);
+                                }
+                            }
+                            SessionRestoreAction::RestoreAndResumeAgents => {
+                                if let Some(snap) = self.pending_restore.take() {
+                                    self.restore_session_snapshot(snap, true);
+                                }
+                            }
+                            SessionRestoreAction::Dismiss => {
+                                self.pending_restore = None;
+                            }
+                        }
+                    }
+
                     // Calculate content area rectangle
                     let content_size = ui.available_size();
                     let content_min = ui.cursor().min;
@@ -1217,11 +1497,166 @@ impl eframe::App for AgeMaxApp {
                     // Handle keyboard input routed to focused pane
                     self.handle_input(ui.ctx(), content_rect);
 
+                    // Handle global Ctrl+Wheel font zoom + hover mouse wheel scrollback / drag splitters
+                    let raw_scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
+                    let pointer_pos = ui.input(|i| i.pointer.interact_pos());
+                    let mods_now = ui.input(|i| i.modifiers);
+                    let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
+                    let primary_down = ui.input(|i| i.pointer.primary_down());
+                    let primary_released = ui.input(|i| i.pointer.primary_released());
+                    let secondary_clicked = ui.input(|i| i.pointer.secondary_clicked());
+                    let mut scrollback_target: Option<(PaneId, i32)> = None;
+
+                    if !self.is_modal_open() && !self.context_menu.is_open && raw_scroll_y.abs() > 0.1
+                    {
+                        if mods_now.ctrl {
+                            let step = if raw_scroll_y > 0.0 { 1.0 } else { -1.0 };
+                            self.adjust_font_zoom(step);
+                        } else if let Some(pos) = pointer_pos {
+                            if let Some(ws) = self.workspaces.get(active_ws_idx) {
+                                if let Some(tab) = ws.active_tab() {
+                                    let rects = if let Some(z) = tab.zoomed_pane {
+                                        let mut m = HashMap::new();
+                                        m.insert(z, content_rect);
+                                        m
+                                    } else {
+                                        tab.layout.compute_rects(content_rect)
+                                    };
+                                    for (pid, r) in rects {
+                                        let egui_r = Rect::from_min_size(
+                                            Pos2::new(r.min.x, r.min.y),
+                                            Vec2::new(r.width(), r.height()),
+                                        );
+                                        if egui_r.contains(pos) {
+                                            let lines = (raw_scroll_y / 18.0).round() as i32;
+                                            let delta = if lines == 0 {
+                                                if raw_scroll_y > 0.0 { 1 } else { -1 }
+                                            } else {
+                                                lines
+                                            };
+                                            scrollback_target = Some((pid, delta));
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some((pid, delta)) = scrollback_target {
+                        if let Some(surface) = self.surfaces.get_mut(&pid) {
+                            surface.scroll_delta(delta);
+                        }
+                    }
+
+                    // Handle interactive split divider drag-to-resize (REQ-071)
+                    let mut divider_dragging_or_hovered = false;
+                    if !self.is_modal_open() && !self.context_menu.is_open {
+                        if let Some(drag) = self.active_split_drag.clone() {
+                            divider_dragging_or_hovered = true;
+                            ui.ctx().set_cursor_icon(match drag.direction {
+                                SplitDirection::Horizontal => egui::CursorIcon::ResizeHorizontal,
+                                SplitDirection::Vertical => egui::CursorIcon::ResizeVertical,
+                            });
+                            if primary_down {
+                                if let Some(pos) = pointer_pos {
+                                    let ratio = match drag.direction {
+                                        SplitDirection::Horizontal => {
+                                            (pos.x - drag.container.min.x)
+                                                / drag.container.width().max(1.0)
+                                        }
+                                        SplitDirection::Vertical => {
+                                            (pos.y - drag.container.min.y)
+                                                / drag.container.height().max(1.0)
+                                        }
+                                    };
+                                    if let Some(ws) = self.workspaces.get_mut(active_ws_idx) {
+                                        if let Some(tab) = ws.active_tab_mut() {
+                                            tab.layout.set_split_ratio_at_path(&drag.path, ratio);
+                                        }
+                                    }
+                                }
+                            }
+                            if primary_released || !primary_down {
+                                self.active_split_drag = None;
+                                self.save_session();
+                            }
+                        } else if let Some(pos) = pointer_pos {
+                            if let Some(ws) = self.workspaces.get(active_ws_idx) {
+                                if let Some(tab) = ws.active_tab() {
+                                    if tab.zoomed_pane.is_none() {
+                                        for div in tab.layout.split_dividers(content_rect) {
+                                            let hit_rect = match div.direction {
+                                                SplitDirection::Horizontal => Rect::from_min_max(
+                                                    Pos2::new(div.min.x - 4.0, div.min.y),
+                                                    Pos2::new(div.max.x + 4.0, div.max.y),
+                                                ),
+                                                SplitDirection::Vertical => Rect::from_min_max(
+                                                    Pos2::new(div.min.x, div.min.y - 4.0),
+                                                    Pos2::new(div.max.x, div.max.y + 4.0),
+                                                ),
+                                            };
+                                            if hit_rect.contains(pos) {
+                                                divider_dragging_or_hovered = true;
+                                                ui.ctx().set_cursor_icon(match div.direction {
+                                                    SplitDirection::Horizontal => {
+                                                        egui::CursorIcon::ResizeHorizontal
+                                                    }
+                                                    SplitDirection::Vertical => {
+                                                        egui::CursorIcon::ResizeVertical
+                                                    }
+                                                });
+                                                ui.painter().line_segment(
+                                                    [
+                                                        Pos2::new(div.min.x, div.min.y),
+                                                        Pos2::new(div.max.x, div.max.y),
+                                                    ],
+                                                    Stroke::new(
+                                                        2.5,
+                                                        color32_from_rgb(
+                                                            resolved_theme.active_border,
+                                                        ),
+                                                    ),
+                                                );
+                                                if primary_pressed {
+                                                    self.active_split_drag = Some(ActiveSplitDrag {
+                                                        path: div.path,
+                                                        direction: div.direction,
+                                                        container: Rect::from_min_max(
+                                                            Pos2::new(
+                                                                div.container.min.x,
+                                                                div.container.min.y,
+                                                            ),
+                                                            Pos2::new(
+                                                                div.container.max.x,
+                                                                div.container.max.y,
+                                                            ),
+                                                        ),
+                                                    });
+                                                }
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // 3. Render panes inside the tab layout
                     let show_pane_headers = self.config.general.effective_show_pane_headers();
                     let show_hints = self.config.general.effective_show_shortcut_hints();
                     let mut pending_pane_action: Option<PaneHeaderAction> = None;
+                    let mut pending_exit_action: Option<ExitBannerAction> = None;
                     let mut clicked_focus_pane: Option<PaneId> = None;
+                    let mut url_to_open: Option<String> = None;
+                    let pane_bg_color = color32_from_rgb(resolved_theme.background);
+                    let default_fg_color = color32_from_rgb(resolved_theme.foreground);
+                    let sel_fill = if resolved_theme.is_light_background() {
+                        Color32::from_rgba_unmultiplied(60, 120, 225, 80)
+                    } else {
+                        Color32::from_rgba_unmultiplied(70, 125, 225, 110)
+                    };
 
                     if let Some(ws) = self.workspaces.get(active_ws_idx) {
                         if let Some(tab) = ws.active_tab() {
@@ -1239,7 +1674,7 @@ impl eframe::App for AgeMaxApp {
                             let sample = ui.painter().layout_no_wrap(
                                 "M".to_string(),
                                 font_id.clone(),
-                                Color32::WHITE,
+                                default_fg_color,
                             );
                             self.char_width = sample.size().x.max(4.0);
                             self.char_height = sample.size().y.max(8.0);
@@ -1251,16 +1686,8 @@ impl eframe::App for AgeMaxApp {
                                     Vec2::new(rect.width(), rect.height()),
                                 );
 
-                                // Check click inside pane (outside modals)
-                                if !self.is_modal_open() && ui.input(|i| i.pointer.any_click()) {
-                                    if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
-                                        if egui_rect.contains(pos) {
-                                            clicked_focus_pane = Some(pane_id);
-                                        }
-                                    }
-                                }
-
-                                // Pane border highlight with colored attention ring
+                                // Pane background and attention ring using resolved TOML ThemeConfig
+                                ui.painter().rect_filled(egui_rect, 2.0, pane_bg_color);
                                 let pane_status = self
                                     .pane_status
                                     .get(&pane_id)
@@ -1269,12 +1696,18 @@ impl eframe::App for AgeMaxApp {
 
                                 let (border_color, stroke_width) = match pane_status {
                                     AgentStatus::WaitingForInput => {
-                                        (Color32::from_rgb(245, 175, 45), 3.0)
+                                        (color32_from_rgb(resolved_theme.ring_waiting), 3.0)
                                     }
-                                    AgentStatus::Done => (Color32::from_rgb(45, 200, 110), 2.5),
-                                    AgentStatus::Failed => (Color32::from_rgb(235, 60, 60), 3.0),
-                                    _ if is_focused => (Color32::from_rgb(70, 110, 200), 1.5),
-                                    _ => (Color32::from_rgb(32, 35, 45), 1.0),
+                                    AgentStatus::Done => {
+                                        (color32_from_rgb(resolved_theme.ring_done), 2.5)
+                                    }
+                                    AgentStatus::Failed => {
+                                        (color32_from_rgb(resolved_theme.ring_failed), 3.0)
+                                    }
+                                    _ if is_focused => {
+                                        (color32_from_rgb(resolved_theme.active_border), 1.5)
+                                    }
+                                    _ => (color32_from_rgb(resolved_theme.inactive_border), 1.0),
                                 };
 
                                 ui.painter().rect_stroke(
@@ -1311,47 +1744,170 @@ impl eframe::App for AgeMaxApp {
                                 let pad = 4.0;
                                 let term_top = rect.min.y + header_h;
                                 let term_h = (rect.height() - header_h).max(40.0);
+                                let term_rect = Rect::from_min_max(
+                                    Pos2::new(egui_rect.min.x, term_top),
+                                    egui_rect.max,
+                                );
                                 let inner_w = (rect.width() - (pad * 2.0)).max(50.0);
                                 let inner_h = (term_h - (pad * 2.0)).max(32.0);
                                 let cols = (inner_w / self.char_width).floor() as u16;
                                 let rows = (inner_h / self.char_height).floor() as u16;
+                                let origin = Pos2::new(rect.min.x + pad, term_top + pad);
 
-                                let painter = ui.painter();
+                                // Handle mouse focus, right-click menu, Ctrl+Click URL, and drag selection
+                                if !self.is_modal_open()
+                                    && !divider_dragging_or_hovered
+                                    && !self.context_menu.is_open
+                                {
+                                    if let Some(pos) = pointer_pos {
+                                        if egui_rect.contains(pos) && (primary_pressed || secondary_clicked) {
+                                            clicked_focus_pane = Some(pane_id);
+                                        }
+                                        if term_rect.contains(pos) && secondary_clicked {
+                                            self.context_menu = ContextMenuState {
+                                                is_open: true,
+                                                pane_id: Some(pane_id),
+                                                pos,
+                                            };
+                                        }
+                                    }
+                                }
+
+                                let mut jump_to_bottom_clicked = false;
+                                let modal_or_menu_open =
+                                    self.is_modal_open() || self.context_menu.is_open;
+
                                 if let Some(surface) = self.surfaces.get_mut(&pane_id) {
                                     let new_size = TerminalSize::new(cols, rows);
                                     let _ = surface.resize(new_size);
 
-                                    let origin = Pos2::new(rect.min.x + pad, term_top + pad);
                                     let cur_rows = surface.rows().min(rows as usize);
                                     let cur_cols = surface.cols().min(cols as usize);
+                                    let scroll_offset = surface.display_offset();
+                                    let surface_exited = surface.has_exited();
+
+                                    // Pointer hover URL check & click-drag text selection inside this pane
+                                    if !modal_or_menu_open && !divider_dragging_or_hovered {
+                                        if let Some(pos) = pointer_pos {
+                                            if mods_now.ctrl && term_rect.contains(pos) {
+                                                if let Some((vr, vc)) = viewport_cell_at_pos(
+                                                    pos,
+                                                    origin,
+                                                    self.char_width,
+                                                    self.char_height,
+                                                    cur_rows,
+                                                    cur_cols,
+                                                ) {
+                                                    if let Some(url) = surface.url_at(vr, vc) {
+                                                        ui.ctx().set_cursor_icon(
+                                                            egui::CursorIcon::PointingHand,
+                                                        );
+                                                        if primary_pressed {
+                                                            url_to_open = Some(url);
+                                                        }
+                                                    }
+                                                }
+                                            } else if primary_pressed
+                                                && term_rect.contains(pos)
+                                                && url_to_open.is_none()
+                                            {
+                                                if let Some((vr, vc)) = viewport_cell_at_pos(
+                                                    pos,
+                                                    origin,
+                                                    self.char_width,
+                                                    self.char_height,
+                                                    cur_rows,
+                                                    cur_cols,
+                                                ) {
+                                                    let pt = GridPoint {
+                                                        line: surface.viewport_to_grid_line(vr),
+                                                        col: vc,
+                                                    };
+                                                    self.text_selection = Some(TextSelection {
+                                                        pane_id,
+                                                        anchor: pt,
+                                                        end: pt,
+                                                        is_dragging: true,
+                                                    });
+                                                }
+                                            } else if primary_down {
+                                                if let Some(ref mut sel) = self.text_selection {
+                                                    if sel.pane_id == pane_id && sel.is_dragging {
+                                                        let clamped = Pos2::new(
+                                                            pos.x.clamp(
+                                                                origin.x,
+                                                                origin.x
+                                                                    + (cur_cols.saturating_sub(1)
+                                                                        as f32
+                                                                        * self.char_width),
+                                                            ),
+                                                            pos.y.clamp(
+                                                                origin.y,
+                                                                origin.y
+                                                                    + (cur_rows.saturating_sub(1)
+                                                                        as f32
+                                                                        * self.char_height),
+                                                            ),
+                                                        );
+                                                        if let Some((vr, vc)) = viewport_cell_at_pos(
+                                                            clamped,
+                                                            origin,
+                                                            self.char_width,
+                                                            self.char_height,
+                                                            cur_rows,
+                                                            cur_cols,
+                                                        ) {
+                                                            sel.end = GridPoint {
+                                                                line: surface
+                                                                    .viewport_to_grid_line(vr),
+                                                                col: vc,
+                                                            };
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if primary_released || !primary_down {
+                                                if let Some(ref mut sel) = self.text_selection {
+                                                    if sel.pane_id == pane_id {
+                                                        sel.is_dragging = false;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    let painter = ui.painter();
+                                    let active_sel = self.text_selection;
 
                                     for r in 0..cur_rows {
                                         let y = origin.y + (r as f32 * self.char_height);
+                                        let abs_line = surface.viewport_to_grid_line(r);
                                         let mut span_text = String::new();
                                         let mut span_start_c = 0;
-                                        let mut span_fg = Color32::from_rgb(220, 224, 232);
+                                        let mut span_fg = default_fg_color;
 
                                         for c in 0..cur_cols {
-                                            let cell = surface.get_cell(r, c);
+                                            let cell = surface.get_cell_for_theme(
+                                                r,
+                                                c,
+                                                resolved_theme.background,
+                                                resolved_theme.foreground,
+                                            );
                                             let x = origin.x + (c as f32 * self.char_width);
+                                            let cell_rect = Rect::from_min_size(
+                                                Pos2::new(x, y),
+                                                Vec2::new(self.char_width, self.char_height),
+                                            );
 
-                                            // Draw custom background if distinct from default dark pane
                                             if let Some(bg) = cell.bg {
-                                                if bg.r > 28
-                                                    || bg.g > 28
-                                                    || bg.b > 38
-                                                    || (bg.r != 16
-                                                        && bg.g != 18
-                                                        && bg.b != 26
-                                                        && (bg.r > 5 || bg.g > 5 || bg.b > 5))
-                                                {
-                                                    let cell_rect = Rect::from_min_size(
-                                                        Pos2::new(x, y),
-                                                        Vec2::new(
-                                                            self.char_width,
-                                                            self.char_height,
-                                                        ),
-                                                    );
+                                                let matches_theme_bg =
+                                                    (bg.r, bg.g, bg.b) == resolved_theme.background;
+                                                let dark_black_blend =
+                                                    !resolved_theme.is_light_background()
+                                                        && bg.r < 5
+                                                        && bg.g < 5
+                                                        && bg.b < 5;
+                                                if !matches_theme_bg && !dark_black_blend {
                                                     painter.rect_filled(
                                                         cell_rect,
                                                         0.0,
@@ -1360,10 +1916,16 @@ impl eframe::App for AgeMaxApp {
                                                 }
                                             }
 
+                                            if let Some(sel) = active_sel {
+                                                if sel.contains_cell(pane_id, abs_line, c) {
+                                                    painter.rect_filled(cell_rect, 0.0, sel_fill);
+                                                }
+                                            }
+
                                             let char_fg = if let Some(fg) = cell.fg {
                                                 Color32::from_rgb(fg.r, fg.g, fg.b)
                                             } else {
-                                                Color32::from_rgb(220, 224, 232)
+                                                default_fg_color
                                             };
 
                                             if cell.c == ' ' || cell.c == '\0' {
@@ -1416,8 +1978,8 @@ impl eframe::App for AgeMaxApp {
                                         }
                                     }
 
-                                    // Draw cursor if pane is focused
-                                    if is_focused {
+                                    // Draw cursor if pane is focused and at live bottom of scrollback
+                                    if is_focused && scroll_offset == 0 && !surface_exited {
                                         let (cursor_row, cursor_col) = surface.cursor_pos();
                                         if cursor_row < cur_rows && cursor_col < cur_cols {
                                             let cur_x =
@@ -1428,20 +1990,82 @@ impl eframe::App for AgeMaxApp {
                                                 Pos2::new(cur_x, cur_y),
                                                 Vec2::new(self.char_width, self.char_height),
                                             );
+                                            let (cr, cg, cb) = resolved_theme.cursor;
                                             painter.rect_filled(
                                                 cursor_rect,
                                                 1.0,
-                                                Color32::from_rgba_unmultiplied(230, 235, 245, 160),
+                                                Color32::from_rgba_unmultiplied(cr, cg, cb, 165),
                                             );
                                         }
+                                    }
+
+                                    // Subtle "Scrolled up" pill in bottom-right corner
+                                    if scroll_offset > 0 && egui_rect.width() > 160.0 {
+                                        let pill_rect = Rect::from_min_size(
+                                            Pos2::new(
+                                                egui_rect.max.x - 148.0,
+                                                egui_rect.max.y - 26.0,
+                                            ),
+                                            Vec2::new(140.0, 20.0),
+                                        );
+                                        ui.scope_builder(
+                                            egui::UiBuilder::new()
+                                                .id_salt(("scroll_pill", pane_id.0))
+                                                .max_rect(pill_rect),
+                                            |ui| {
+                                                if ui
+                                                    .small_button(format!(
+                                                        "↓ Latest (+{})",
+                                                        scroll_offset
+                                                    ))
+                                                    .clicked()
+                                                {
+                                                    jump_to_bottom_clicked = true;
+                                                }
+                                            },
+                                        );
+                                    }
+
+                                    // Inline exit recovery bar if child shell/agent exited (REQ-074)
+                                    if surface_exited {
+                                        let has_conv =
+                                            self.agent_conversation_ids.contains_key(&pane_id);
+                                        if let Some(act) = render_pane_exit_banner(
+                                            ui, egui_rect, pane_id, has_conv,
+                                        ) {
+                                            pending_exit_action = Some(act);
+                                        }
+                                    }
+
+                                    if jump_to_bottom_clicked {
+                                        surface.scroll_to_bottom();
                                     }
                                 }
                             }
                         }
                     }
 
+                    if let Some(url) = url_to_open {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                    }
+
                     if let Some(pid) = clicked_focus_pane {
                         self.focus_pane_in_active_tab(pid);
+                    }
+
+                    if let Some(exit_action) = pending_exit_action {
+                        match exit_action {
+                            ExitBannerAction::RestartShell(pid) => {
+                                self.restart_pane_shell(pid);
+                            }
+                            ExitBannerAction::ResumeAgent(pid) => {
+                                self.resume_agent_in_pane(pid);
+                            }
+                            ExitBannerAction::ClosePane(pid) => {
+                                self.focus_pane_in_active_tab(pid);
+                                self.close_active_pane();
+                            }
+                        }
                     }
 
                     if let Some(pane_action) = pending_pane_action {
@@ -1581,13 +2205,57 @@ impl eframe::App for AgeMaxApp {
                     }
                 }
 
-                // 7. Interactive View Mode & Shortcuts Reference Modal
+                // 7. Interactive View Mode, Theme & Font Settings Modal
                 if self.view_settings_modal.show(ui.ctx(), &mut self.config) {
+                    self.font_size = self.config.general.font_size.clamp(9.0, 32.0);
                     let _ = self.config.save_default();
+                }
+
+                // 8. Right-Click Context Menu overlay (Copy / Paste / Clear / Split)
+                let has_selection = self
+                    .text_selection
+                    .map(|s| s.is_non_empty() && Some(s.pane_id) == self.context_menu.pane_id)
+                    .unwrap_or(false);
+                if let Some(ctx_action) =
+                    render_context_menu(ui.ctx(), &mut self.context_menu, has_selection)
+                {
+                    match ctx_action {
+                        ContextMenuAction::Copy(pid) => {
+                            self.copy_selection_to_clipboard(ui.ctx(), Some(pid));
+                        }
+                        ContextMenuAction::Paste(pid) => {
+                            self.focus_pane_in_active_tab(pid);
+                            ui.ctx()
+                                .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                        }
+                        ContextMenuAction::Clear(pid) => {
+                            if let Some(surface) = self.surfaces.get_mut(&pid) {
+                                surface.clear_screen();
+                            }
+                            self.text_selection = None;
+                        }
+                        ContextMenuAction::SplitRight(pid) => {
+                            self.focus_pane_in_active_tab(pid);
+                            self.split_active_pane(SplitDirection::Horizontal);
+                        }
+                        ContextMenuAction::SplitDown(pid) => {
+                            self.focus_pane_in_active_tab(pid);
+                            self.split_active_pane(SplitDirection::Vertical);
+                        }
+                        ContextMenuAction::LaunchAgy(pid) => self.launch_agy_in_pane(pid),
+                    }
                 }
             });
         });
     }
+}
+
+fn is_safe_conversation_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
 }
 
 fn egui_key_to_code(key: Key) -> Option<KeyCode> {

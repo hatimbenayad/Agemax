@@ -1,6 +1,7 @@
 use crate::folder_picker::spawn_folder_picker_async;
 pub use agemax_config::keybindings::KeybindingsConfig;
 use agemax_config::schema::{AgeMaxConfig, UiMode};
+use agemax_config::theme::{ThemeConfig, ThemePreset};
 use agemax_core::layout::PaneId;
 use agemax_core::status::AgentStatus;
 use crossbeam_channel::Receiver;
@@ -335,11 +336,11 @@ impl ViewSettingsModal {
 
         let mut changed = false;
         let mut should_close = false;
-        let pos = centered_modal_pos(ctx, 500.0, 420.0);
+        let pos = centered_modal_pos(ctx, 500.0, 490.0);
 
         egui::Window::new("view_settings_modal")
             .fixed_pos(pos)
-            .fixed_size(Vec2::new(500.0, 415.0))
+            .fixed_size(Vec2::new(500.0, 480.0))
             .title_bar(false)
             .resizable(false)
             .collapsible(false)
@@ -435,6 +436,52 @@ impl ViewSettingsModal {
                         config.general.show_shortcut_hints = Some(hints_val);
                         changed = true;
                     }
+
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new("Theme Preset")
+                            .size(12.5)
+                            .color(Color32::WHITE)
+                            .strong(),
+                    );
+                    ui.horizontal(|ui| {
+                        let midnight = ThemeConfig::from_preset(ThemePreset::MidnightDark);
+                        let high_contrast = ThemeConfig::from_preset(ThemePreset::HighContrast);
+                        let soft_light = ThemeConfig::from_preset(ThemePreset::SoftLight);
+
+                        if ui
+                            .selectable_label(config.theme == midnight, "Midnight Dark")
+                            .clicked()
+                        {
+                            config.theme = midnight;
+                            changed = true;
+                        }
+                        if ui
+                            .selectable_label(config.theme == high_contrast, "High Contrast")
+                            .clicked()
+                        {
+                            config.theme = high_contrast;
+                            changed = true;
+                        }
+                        if ui
+                            .selectable_label(config.theme == soft_light, "Soft Light")
+                            .clicked()
+                        {
+                            config.theme = soft_light;
+                            changed = true;
+                        }
+                    });
+
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Terminal Font Size:");
+                        if ui
+                            .add(egui::Slider::new(&mut config.general.font_size, 10.0..=26.0).step_by(1.0))
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    });
 
                     ui.add_space(8.0);
                     ui.separator();

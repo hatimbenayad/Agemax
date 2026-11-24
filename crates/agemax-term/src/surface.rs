@@ -1,5 +1,5 @@
 use crate::pty::{PtyConfig, PtyError, PtyInstance};
-use crate::vt::{RenderCell, TerminalGrid, TerminalGridConfig};
+use crate::vt::{GridPoint, RenderCell, TerminalGrid, TerminalGridConfig};
 use agemax_core::model::{SurfaceId, TerminalSize};
 use crossbeam_channel::Receiver;
 use parking_lot::RwLock;
@@ -68,8 +68,56 @@ impl TerminalSurface {
         self.grid.read().get_cell(row, col)
     }
 
+    pub fn get_cell_for_theme(
+        &self,
+        row: usize,
+        col: usize,
+        default_bg: (u8, u8, u8),
+        default_fg: (u8, u8, u8),
+    ) -> RenderCell {
+        self.grid
+            .read()
+            .get_cell_for_theme(row, col, default_bg, default_fg)
+    }
+
     pub fn cursor_pos(&self) -> (usize, usize) {
         self.grid.read().cursor_pos()
+    }
+
+    pub fn display_offset(&self) -> usize {
+        self.grid.read().display_offset()
+    }
+
+    pub fn history_size(&self) -> usize {
+        self.grid.read().history_size()
+    }
+
+    pub fn scroll_delta(&mut self, delta: i32) {
+        self.grid.write().scroll_delta(delta);
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        self.grid.write().scroll_to_bottom();
+    }
+
+    pub fn clear_screen(&mut self) {
+        self.grid.write().clear_screen();
+    }
+
+    pub fn viewport_to_grid_line(&self, viewport_row: usize) -> i32 {
+        self.grid.read().viewport_to_grid_line(viewport_row)
+    }
+
+    pub fn extract_selection_text(&self, start: GridPoint, end: GridPoint) -> String {
+        self.grid.read().extract_selection_text(start, end)
+    }
+
+    pub fn url_at(&self, viewport_row: usize, col: usize) -> Option<String> {
+        self.grid.read().url_at(viewport_row, col)
+    }
+
+    pub fn has_exited(&self) -> bool {
+        self.pty.has_exited()
     }
 
     pub fn cols(&self) -> usize {

@@ -70,6 +70,17 @@ pub enum Direction {
     Down,
 }
 
+/// Interactive split divider segment along with the tree path to the owning `LayoutTree::Split`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SplitDivider {
+    /// Path of child steps (`0` = first, `1` = second) from the root layout node to this split.
+    pub path: Vec<u8>,
+    pub direction: SplitDirection,
+    pub min: Point,
+    pub max: Point,
+    pub container: Rect,
+}
+
 /// Binary tree representing pane splits inside a tab.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum LayoutTree {
@@ -190,6 +201,30 @@ impl LayoutTree {
         map
     }
 
+    /// Compute interactive split dividers with exact binary paths for drag resizing.
+    pub fn split_dividers(&self, bounds: Rect) -> Vec<SplitDivider> {
+        let mut dividers = Vec::new();
+        let mut path = Vec::new();
+        self.collect_dividers(bounds, &mut path, &mut dividers);
+        dividers
+    }
+
+    /// Update the ratio (`0.10..=0.90`) of the split node addressed by `path`.
+    pub fn set_split_ratio_at_path(&mut self, path: &[u8], new_ratio: f32) -> bool {
+        match (path.split_first(), self) {
+            (None, Self::Split { ratio, .. }) => {
+                *ratio = new_ratio.clamp(0.10, 0.90);
+                true
+            }
+            (Some((&branch, rest)), Self::Split { first, second, .. }) => match branch {
+                0 => first.set_split_ratio_at_path(rest, new_ratio),
+                1 => second.set_split_ratio_at_path(rest, new_ratio),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     fn collect_rects(&self, bounds: Rect, map: &mut HashMap<PaneId, Rect>) {
         match self {
             Self::Leaf(id) => {
@@ -201,34 +236,35 @@ impl LayoutTree {
                 first,
                 second,
             } => {
-                let clamped_ratio = ratio.clamp(0.05, 0.95);
-                match direction {
-                    SplitDirection::Horizontal => {
-                        let total_w = bounds.width();
-                        let w1 = (total_w * clamped_ratio).floor();
-                        let r1 = Rect::from_min_size(bounds.min, w1, bounds.height());
-                        let r2 = Rect::from_min_size(
-                            Point::new(bounds.min.x + w1, bounds.min.y),
-                            total_w - w1,
-                            bounds.height(),
-                        );
-                        first.collect_rects(r1, map);
-                        second.collect_rects(r2, map);
-                    }
-                    SplitDirection::Vertical => {
-                        let total_h = bounds.height();
-                        let h1 = (total_h * clamped_ratio).floor();
-                        let r1 = Rect::from_min_size(bounds.min, bounds.width(), h1);
-                        let r2 = Rect::from_min_size(
-                            Point::new(bounds.min.x, bounds.min.y + h1),
-                            bounds.width(),
-                            total_h - h1,
-                        );
-                        first.collect_rects(r1, map);
-                        second.collect_rects(r2, map);
-                    }
-                }
+                let (r1, r2, _) = partition_split(*direction, *ratio, bounds);
+                first.collect_rects(r1, map);
+                second.collect_rects(r2, map);
             }
+        }
+    }
+
+    fn collect_dividers(&self, bounds: Rect, path: &mut Vec<u8>, out: &mut Vec<SplitDivider>) {
+        if let Self::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } = self
+        {
+            let (r1, r2, (min, max)) = partition_split(*direction, *ratio, bounds);
+            out.push(SplitDivider {
+                path: path.clone(),
+                direction: *direction,
+                min,
+                max,
+                container: bounds,
+            });
+            path.push(0);
+            first.collect_dividers(r1, path, out);
+            path.pop();
+            path.push(1);
+            second.collect_dividers(r2, path, out);
+            path.pop();
         }
     }
 
@@ -275,5 +311,53 @@ impl LayoutTree {
         }
 
         best_candidate.map(|(id, _)| id)
+    }
+}
+
+fn partition_split(
+    direction: SplitDirection,
+    ratio: f32,
+    bounds: Rect,
+) -> (Rect, Rect, (Point, Point)) {
+    let clamped_ratio = ratio.clamp(0.05, 0.95);
+    match direction {
+        SplitDirection::Horizontal => {
+            let total_w = bounds.width();
+            let w1 = (total_w * clamped_ratio).floor();
+            let div_x = bounds.min.x + w1;
+            let r1 = Rect::from_min_size(bounds.min, w1, bounds.height());
+            let r2 = Rect::from_min_size(
+                Point::new(div_x, bounds.min.y),
+                total_w - w1,
+                bounds.height(),
+            );
+            (
+                r1,
+                r2,
+                (
+                    Point::new(div_x, bounds.min.y),
+                    Point::new(div_x, bounds.max.y),
+                ),
+            )
+        }
+        SplitDirection::Vertical => {
+            let total_h = bounds.height();
+            let h1 = (total_h * clamped_ratio).floor();
+            let div_y = bounds.min.y + h1;
+            let r1 = Rect::from_min_size(bounds.min, bounds.width(), h1);
+            let r2 = Rect::from_min_size(
+                Point::new(bounds.min.x, div_y),
+                bounds.width(),
+                total_h - h1,
+            );
+            (
+                r1,
+                r2,
+                (
+                    Point::new(bounds.min.x, div_y),
+                    Point::new(bounds.max.x, div_y),
+                ),
+            )
+        }
     }
 }
