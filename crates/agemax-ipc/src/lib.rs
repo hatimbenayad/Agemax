@@ -1,5 +1,6 @@
 //! Named-pipe JSON-RPC IPC server and client for Age Max.
 
+pub mod activation;
 pub mod client;
 pub mod protocol;
 pub mod security;

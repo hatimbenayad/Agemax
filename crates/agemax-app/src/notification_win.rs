@@ -2,14 +2,16 @@ use agemax_core::notification::NotificationItem;
 use agemax_core::status::AgentStatus;
 
 #[cfg(windows)]
-use windows::core::HSTRING;
+use windows::core::{BOOL, HSTRING};
 #[cfg(windows)]
 use windows::Data::Xml::Dom::XmlDocument;
 #[cfg(windows)]
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, LPARAM};
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
-    FlashWindowEx, GetForegroundWindow, FLASHWINFO, FLASHW_TIMERNOFG, FLASHW_TRAY,
+    EnumWindows, FlashWindowEx, GetForegroundWindow, GetWindowThreadProcessId, IsIconic,
+    IsWindowVisible, SetForegroundWindow, ShowWindow, FLASHWINFO, FLASHW_TIMERNOFG, FLASHW_TRAY,
+    SW_RESTORE,
 };
 #[cfg(windows)]
 use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
@@ -17,6 +19,7 @@ use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
 pub trait NotificationService: Send + Sync {
     fn show_notification(&self, item: &NotificationItem);
     fn flash_window(&self);
+    fn activate_window(&self);
 }
 
 pub struct PlatformNotificationService;
@@ -45,7 +48,6 @@ impl NotificationService for PlatformNotificationService {
             };
             let body = &item.message;
 
-            // Attempt native UWP / WinRT Toast notification
             if let Err(e) = show_windows_toast(title, body) {
                 tracing::debug!("Native Windows toast delivery failed: {e:?}, using fallback");
             }
@@ -60,7 +62,7 @@ impl NotificationService for PlatformNotificationService {
     fn flash_window(&self) {
         #[cfg(windows)]
         unsafe {
-            let hwnd = GetForegroundWindow();
+            let hwnd = find_current_process_hwnd().unwrap_or_else(|| GetForegroundWindow());
             if hwnd != HWND(std::ptr::null_mut()) {
                 let info = FLASHWINFO {
                     cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
@@ -73,6 +75,49 @@ impl NotificationService for PlatformNotificationService {
             }
         }
     }
+
+    fn activate_window(&self) {
+        #[cfg(windows)]
+        unsafe {
+            if let Some(hwnd) = find_current_process_hwnd() {
+                if IsIconic(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                }
+                let _ = SetForegroundWindow(hwnd);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn find_current_process_hwnd() -> Option<HWND> {
+    struct SearchState {
+        pid: u32,
+        found: Option<HWND>,
+    }
+
+    unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let state = &mut *(lparam.0 as *mut SearchState);
+        let mut window_pid: u32 = 0;
+        let _ = GetWindowThreadProcessId(hwnd, Some(&mut window_pid));
+        if window_pid == state.pid && IsWindowVisible(hwnd).as_bool() {
+            state.found = Some(hwnd);
+            return BOOL(0);
+        }
+        BOOL(1)
+    }
+
+    let mut state = SearchState {
+        pid: std::process::id(),
+        found: None,
+    };
+    unsafe {
+        let _ = EnumWindows(
+            Some(enum_cb),
+            LPARAM(&mut state as *mut SearchState as isize),
+        );
+    }
+    state.found
 }
 
 #[cfg(windows)]

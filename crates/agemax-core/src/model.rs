@@ -100,3 +100,16 @@ impl Rect {
         p.x >= self.min.x && p.x <= self.max.x && p.y >= self.min.y && p.y <= self.max.y
     }
 }
+
+/// Forward-compatible pane surface kind (Unit 7 / Unit 11 stretch hooks).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SurfaceKind {
+    #[default]
+    Terminal,
+    BrowserPreview {
+        url: String,
+    },
+    AgentCardPanel {
+        session_id: Option<String>,
+    },
+}
