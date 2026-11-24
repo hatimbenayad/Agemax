@@ -1,13 +1,19 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod chrome_ui;
 mod command_palette;
+mod folder_picker;
 mod ipc_bridge;
 mod notification_win;
 mod sidebar;
 mod tab_bar;
 
+use agemax_agy::adapter::{AgentAdapter, AntigravityAdapter};
 use agemax_agy::osc::{AgentOscEvent, OscParser};
 use agemax_agy::profile::ProfileManager;
 use agemax_config::hot_reload::ConfigWatcher;
-use agemax_config::schema::AgeMaxConfig;
+use agemax_config::keybindings::{KeyChord, KeyCode};
+use agemax_config::schema::{AgeMaxConfig, UiMode};
 use agemax_core::layout::{Direction, PaneId, SplitDirection, WorkspaceId};
 use agemax_core::model::{Point, Rect as CoreRect, TerminalSize};
 use agemax_core::notification::NotificationStore;
@@ -19,6 +25,10 @@ use agemax_core::workspace::{Tab, Workspace};
 use agemax_term::metadata::detect_git_branch;
 use agemax_term::pty::{detect_default_shell, PtyConfig};
 use agemax_term::surface::TerminalSurface;
+use chrome_ui::{
+    render_pane_header, render_top_toolbar, NewWorkspaceModal, PaneHeaderAction, PaneHeaderProps,
+    RenameModal, RenameTarget, ToolbarAction, ViewSettingsModal,
+};
 use command_palette::{CommandPalette, PaletteAction};
 use eframe::egui::{self, Color32, FontId, Key, Pos2, Rect, Stroke, StrokeKind, Vec2};
 use ipc_bridge::{start_ipc_server, IpcAppCommand};
@@ -94,6 +104,9 @@ pub struct AgeMaxApp {
     config: AgeMaxConfig,
     config_watcher: Option<ConfigWatcher>,
     command_palette: CommandPalette,
+    new_workspace_modal: NewWorkspaceModal,
+    rename_modal: RenameModal,
+    view_settings_modal: ViewSettingsModal,
     show_notifications_panel: bool,
     is_sidebar_collapsed: bool,
     font_size: f32,
@@ -141,7 +154,10 @@ impl AgeMaxApp {
 
         let config_watcher = ConfigWatcher::watch(AgeMaxConfig::default_path()).ok();
         let mut command_palette = CommandPalette::new();
+        command_palette.sync_builtins(&config.keybindings);
         command_palette.set_custom_commands(&config.commands);
+
+        let initial_font_size = config.general.font_size.clamp(9.0, 32.0);
 
         Self {
             workspaces: vec![initial_workspace],
@@ -156,13 +172,160 @@ impl AgeMaxApp {
             config,
             config_watcher,
             command_palette,
+            new_workspace_modal: NewWorkspaceModal::new(),
+            rename_modal: RenameModal::default(),
+            view_settings_modal: ViewSettingsModal::default(),
             show_notifications_panel: false,
             is_sidebar_collapsed: false,
-            font_size: 14.0,
+            font_size: initial_font_size,
             char_width: 8.4,
             char_height: 18.0,
             start_time,
             first_frame_rendered: false,
+        }
+    }
+
+    fn is_modal_open(&self) -> bool {
+        self.command_palette.is_open
+            || self.new_workspace_modal.is_open
+            || self.rename_modal.is_open
+            || self.view_settings_modal.is_open
+    }
+
+    fn open_new_workspace_modal(&mut self) {
+        let default_dir = self
+            .active_workspace()
+            .map(|w| w.cwd.clone())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let next_idx = self.workspaces.len() + 1;
+        self.new_workspace_modal.open(&default_dir, next_idx);
+    }
+
+    fn create_workspace_in_dir(
+        &mut self,
+        name: String,
+        cwd: PathBuf,
+        launch_agy: bool,
+    ) -> Option<WorkspaceId> {
+        let pane_id = PaneId::new();
+        let mut ws = Workspace::new(name, cwd.clone(), pane_id);
+        ws.git_branch = detect_git_branch(&cwd);
+
+        let surface = spawn_terminal_surface(TerminalSize::new(80, 24), &cwd).ok()?;
+        let ws_id = ws.id;
+
+        self.surfaces.insert(pane_id, surface);
+        self.osc_parsers.insert(pane_id, OscParser::new());
+        self.pane_status.insert(pane_id, AgentStatus::Idle);
+        self.workspaces.push(ws);
+        self.active_workspace_index = self.workspaces.len() - 1;
+        self.config.merge_workspace_config(&cwd);
+        self.command_palette
+            .set_custom_commands(&self.config.commands);
+        self.save_session();
+
+        if launch_agy {
+            self.launch_agy_in_pane(pane_id);
+        }
+        Some(ws_id)
+    }
+
+    fn close_workspace(&mut self, idx: usize) -> bool {
+        if self.workspaces.len() <= 1 || idx >= self.workspaces.len() {
+            return false;
+        }
+        let ws = self.workspaces.remove(idx);
+        for tab in ws.tabs {
+            for p in tab.layout.panes() {
+                self.surfaces.remove(&p);
+                self.osc_parsers.remove(&p);
+                self.pane_status.remove(&p);
+                self.agent_conversation_ids.remove(&p);
+            }
+        }
+        if self.active_workspace_index >= self.workspaces.len() {
+            self.active_workspace_index = self.workspaces.len().saturating_sub(1);
+        }
+        self.save_session();
+        true
+    }
+
+    fn create_new_tab(&mut self) {
+        let active_ws_idx = self.active_workspace_index;
+        let cwd = match self.workspaces.get(active_ws_idx) {
+            Some(ws) => ws.cwd.clone(),
+            None => return,
+        };
+        let new_pane = PaneId::new();
+        if let Ok(surface) = spawn_terminal_surface(TerminalSize::new(80, 24), &cwd) {
+            self.surfaces.insert(new_pane, surface);
+            self.osc_parsers.insert(new_pane, OscParser::new());
+            self.pane_status.insert(new_pane, AgentStatus::Idle);
+            if let Some(ws) = self.workspaces.get_mut(active_ws_idx) {
+                let tab_num = ws.tabs.len() + 1;
+                ws.tabs
+                    .push(Tab::new(format!("Terminal {}", tab_num), new_pane));
+                ws.active_tab_index = ws.tabs.len() - 1;
+            }
+            self.save_session();
+        }
+    }
+
+    fn focus_pane_in_active_tab(&mut self, pane_id: PaneId) {
+        if let Some(ws) = self.active_workspace_mut() {
+            if let Some(tab) = ws.active_tab_mut() {
+                if tab.layout.panes().contains(&pane_id) {
+                    tab.active_pane = pane_id;
+                }
+            }
+        }
+    }
+
+    fn toggle_zoom_active(&mut self) {
+        if let Some(ws) = self.active_workspace_mut() {
+            if let Some(tab) = ws.active_tab_mut() {
+                tab.toggle_zoom();
+            }
+        }
+    }
+
+    fn jump_to_oldest_unread(&mut self) {
+        if let Some((ws_id, pane_id)) = self.notification_store.oldest_unread_pane() {
+            if let Some(idx) = self.workspaces.iter().position(|w| w.id == ws_id) {
+                self.active_workspace_index = idx;
+                if let Some(ws) = self.workspaces.get_mut(idx) {
+                    if let Some(tab) = ws.active_tab_mut() {
+                        tab.active_pane = pane_id;
+                    }
+                }
+                self.notification_store.mark_pane_read(pane_id);
+            }
+        }
+    }
+
+    fn switch_ui_mode(&mut self, mode: UiMode) {
+        self.config.general.ui_mode = mode;
+        self.config.general.show_toolbar = None;
+        self.config.general.show_pane_headers = None;
+        self.config.general.show_shortcut_hints = None;
+        let _ = self.config.save_default();
+    }
+
+    fn launch_agy_in_pane(&mut self, pane_id: PaneId) {
+        self.focus_pane_in_active_tab(pane_id);
+        let detected = AntigravityAdapter::new().detect_binary();
+        if detected.is_some() {
+            if let Some(surface) = self.surfaces.get_mut(&pane_id) {
+                let _ = surface.send_input(b"agy\r");
+            }
+        } else if let Some(ws_id) = self.find_workspace_for_pane(pane_id) {
+            self.notification_store.notify(
+                ws_id,
+                pane_id,
+                AgentStatus::Failed,
+                "agy.exe not found. Run: irm https://antigravity.google/cli/install.ps1 | iex",
+            );
+            self.show_notifications_panel = true;
         }
     }
 
@@ -239,53 +402,33 @@ impl AgeMaxApp {
 
     pub fn execute_palette_action(&mut self, action: PaletteAction) {
         match action {
+            PaletteAction::NewTab => self.create_new_tab(),
             PaletteAction::SplitRight => self.split_active_pane(SplitDirection::Horizontal),
             PaletteAction::SplitDown => self.split_active_pane(SplitDirection::Vertical),
             PaletteAction::ClosePane => self.close_active_pane(),
-            PaletteAction::ToggleZoom => {
-                if let Some(ws) = self.active_workspace_mut() {
-                    if let Some(tab) = ws.active_tab_mut() {
-                        tab.toggle_zoom();
-                    }
-                }
-            }
+            PaletteAction::ToggleZoom => self.toggle_zoom_active(),
             PaletteAction::ToggleSidebar => {
                 self.is_sidebar_collapsed = !self.is_sidebar_collapsed;
             }
-            PaletteAction::JumpUnread => {
-                if let Some((ws_id, pane_id)) = self.notification_store.oldest_unread_pane() {
-                    if let Some(idx) = self.workspaces.iter().position(|w| w.id == ws_id) {
-                        self.active_workspace_index = idx;
-                        if let Some(ws) = self.workspaces.get_mut(idx) {
-                            if let Some(tab) = ws.active_tab_mut() {
-                                tab.active_pane = pane_id;
-                            }
-                        }
-                        self.notification_store.mark_pane_read(pane_id);
-                    }
-                }
-            }
+            PaletteAction::JumpUnread => self.jump_to_oldest_unread(),
             PaletteAction::ToggleNotifications => {
                 self.show_notifications_panel = !self.show_notifications_panel;
             }
-            PaletteAction::NewWorkspace => {
-                let pane_id = PaneId::new();
-                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                let git_branch = detect_git_branch(&cwd);
-                let mut ws = Workspace::new(
-                    format!("Workspace {}", self.workspaces.len() + 1),
-                    cwd.clone(),
-                    pane_id,
-                );
-                ws.git_branch = git_branch;
-                if let Ok(surface) = spawn_terminal_surface(TerminalSize::new(80, 24), &cwd) {
-                    self.surfaces.insert(pane_id, surface);
-                    self.osc_parsers.insert(pane_id, OscParser::new());
-                    self.pane_status.insert(pane_id, AgentStatus::Idle);
-                    self.workspaces.push(ws);
-                    self.active_workspace_index = self.workspaces.len() - 1;
-                    self.save_session();
+            PaletteAction::NewWorkspace => self.open_new_workspace_modal(),
+            PaletteAction::LaunchAgy => {
+                if let Some(pane_id) = self.active_pane_id() {
+                    self.launch_agy_in_pane(pane_id);
                 }
+            }
+            PaletteAction::ToggleUiMode => {
+                let next = match self.config.general.ui_mode {
+                    UiMode::Guided => UiMode::Minimal,
+                    UiMode::Minimal => UiMode::Guided,
+                };
+                self.switch_ui_mode(next);
+            }
+            PaletteAction::OpenViewSettings => {
+                self.view_settings_modal.is_open = true;
             }
             PaletteAction::Custom(cmd) => {
                 let target = self.active_pane_id();
@@ -394,27 +537,16 @@ impl AgeMaxApp {
                 let _ = reply.send(serde_json::json!(list));
             }
             IpcAppCommand::WorkspaceCreate { name, cwd, reply } => {
-                let pane_id = PaneId::new();
                 let dir = cwd.map(PathBuf::from).unwrap_or_else(|| {
                     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
                 });
                 let ws_name =
                     name.unwrap_or_else(|| format!("Workspace {}", self.workspaces.len() + 1));
-                let mut ws = Workspace::new(ws_name, dir.clone(), pane_id);
-                ws.git_branch = detect_git_branch(&dir);
 
-                if let Ok(surface) = spawn_terminal_surface(TerminalSize::new(80, 24), &dir) {
-                    self.surfaces.insert(pane_id, surface);
-                    self.osc_parsers.insert(pane_id, OscParser::new());
-                    self.pane_status.insert(pane_id, AgentStatus::Idle);
-                    self.workspaces.push(ws);
-                    self.active_workspace_index = self.workspaces.len() - 1;
-                    self.save_session();
-
-                    let last_ws = self.workspaces.last().unwrap();
+                if let Some(ws_id) = self.create_workspace_in_dir(ws_name.clone(), dir, false) {
                     let _ = reply.send(serde_json::json!({
-                        "id": last_ws.id.0.to_string(),
-                        "name": last_ws.name
+                        "id": ws_id.0.to_string(),
+                        "name": ws_name
                     }));
                 } else {
                     let _ = reply.send(serde_json::json!({ "error": "Failed to spawn surface" }));
@@ -422,20 +554,7 @@ impl AgeMaxApp {
             }
             IpcAppCommand::WorkspaceClose { id, reply } => {
                 if let Some(idx) = self.workspaces.iter().position(|w| w.id == id) {
-                    if self.workspaces.len() > 1 {
-                        let ws = self.workspaces.remove(idx);
-                        for tab in ws.tabs {
-                            for p in tab.layout.panes() {
-                                self.surfaces.remove(&p);
-                                self.osc_parsers.remove(&p);
-                                self.pane_status.remove(&p);
-                                self.agent_conversation_ids.remove(&p);
-                            }
-                        }
-                        if self.active_workspace_index >= self.workspaces.len() {
-                            self.active_workspace_index = self.workspaces.len().saturating_sub(1);
-                        }
-                        self.save_session();
+                    if self.close_workspace(idx) {
                         let _ = reply.send(serde_json::json!({ "closed": id.0.to_string() }));
                     } else {
                         let _ = reply.send(serde_json::json!({
@@ -589,7 +708,21 @@ impl AgeMaxApp {
         }
     }
 
+    fn matches_keybinding(&self, spec: &str, key: Key, modifiers: &egui::Modifiers) -> bool {
+        let Some(key_code) = egui_key_to_code(key) else {
+            return false;
+        };
+        let Some(chord) = KeyChord::parse(spec) else {
+            return false;
+        };
+        chord.matches(modifiers.ctrl, modifiers.shift, modifiers.alt, key_code)
+    }
+
     fn handle_input(&mut self, ctx: &egui::Context, content_rect: CoreRect) {
+        if self.is_modal_open() {
+            return;
+        }
+
         let events = ctx.input(|i| i.events.clone());
         let focused_pane_id = self.active_pane_id();
 
@@ -612,88 +745,67 @@ impl AgeMaxApp {
                     modifiers,
                     ..
                 } => {
-                    // Global Shortcuts:
-                    if modifiers.ctrl && !modifiers.shift && key == Key::B {
+                    // Configurable global shortcuts (dynamic from KeybindingsConfig):
+                    let kb = &self.config.keybindings;
+                    if self.matches_keybinding(&kb.toggle_sidebar, key, &modifiers) {
                         self.is_sidebar_collapsed = !self.is_sidebar_collapsed;
                         continue;
                     }
+                    if self.matches_keybinding(&kb.command_palette, key, &modifiers) {
+                        self.command_palette.open();
+                        continue;
+                    }
+                    if self.matches_keybinding(&kb.new_tab, key, &modifiers) {
+                        self.create_new_tab();
+                        continue;
+                    }
+                    if self.matches_keybinding(&kb.split_horizontal, key, &modifiers) {
+                        self.split_active_pane(SplitDirection::Horizontal);
+                        continue;
+                    }
+                    if self.matches_keybinding(&kb.split_vertical, key, &modifiers) {
+                        self.split_active_pane(SplitDirection::Vertical);
+                        continue;
+                    }
+                    if self.matches_keybinding(&kb.close_pane, key, &modifiers) {
+                        self.close_active_pane();
+                        continue;
+                    }
+                    if self.matches_keybinding(&kb.zoom_pane, key, &modifiers) {
+                        self.toggle_zoom_active();
+                        continue;
+                    }
+                    if self.matches_keybinding(&kb.jump_unread, key, &modifiers) {
+                        self.jump_to_oldest_unread();
+                        continue;
+                    }
+                    if self.matches_keybinding(&kb.toggle_notifications, key, &modifiers) {
+                        self.show_notifications_panel = !self.show_notifications_panel;
+                        continue;
+                    }
 
-                    if modifiers.ctrl && modifiers.shift {
-                        match key {
-                            Key::P => {
-                                self.command_palette.open();
-                                continue;
-                            }
-                            Key::D => {
-                                self.split_active_pane(SplitDirection::Horizontal);
-                                continue;
-                            }
-                            Key::R => {
-                                self.split_active_pane(SplitDirection::Vertical);
-                                continue;
-                            }
-                            Key::W => {
-                                self.close_active_pane();
-                                continue;
-                            }
-                            Key::Enter => {
-                                if let Some(ws) = self.active_workspace_mut() {
-                                    if let Some(tab) = ws.active_tab_mut() {
-                                        tab.toggle_zoom();
-                                    }
+                    if modifiers.ctrl && modifiers.shift && key == Key::V {
+                        if let Some(clipboard) = ctx.input(|i| {
+                            i.events.iter().find_map(|e| {
+                                if let egui::Event::Paste(text) = e {
+                                    Some(text.clone())
+                                } else {
+                                    None
                                 }
-                                continue;
-                            }
-                            Key::U => {
-                                // Jump to oldest unread waiting pane
-                                if let Some((ws_id, pane_id)) =
-                                    self.notification_store.oldest_unread_pane()
+                            })
+                        }) {
+                            if let Some(id) = focused_pane_id {
+                                self.notification_store.mark_pane_read(id);
+                                if self.pane_status.get(&id) == Some(&AgentStatus::WaitingForInput)
                                 {
-                                    if let Some(idx) =
-                                        self.workspaces.iter().position(|w| w.id == ws_id)
-                                    {
-                                        self.active_workspace_index = idx;
-                                        if let Some(ws) = self.workspaces.get_mut(idx) {
-                                            if let Some(tab) = ws.active_tab_mut() {
-                                                tab.active_pane = pane_id;
-                                            }
-                                        }
-                                        self.notification_store.mark_pane_read(pane_id);
-                                    }
+                                    self.pane_status.insert(id, AgentStatus::Working);
                                 }
-                                continue;
-                            }
-                            Key::N => {
-                                self.show_notifications_panel = !self.show_notifications_panel;
-                                continue;
-                            }
-                            Key::V => {
-                                // Paste
-                                if let Some(clipboard) = ctx.input(|i| {
-                                    i.events.iter().find_map(|e| {
-                                        if let egui::Event::Paste(text) = e {
-                                            Some(text.clone())
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                }) {
-                                    if let Some(id) = focused_pane_id {
-                                        self.notification_store.mark_pane_read(id);
-                                        if self.pane_status.get(&id)
-                                            == Some(&AgentStatus::WaitingForInput)
-                                        {
-                                            self.pane_status.insert(id, AgentStatus::Working);
-                                        }
-                                        if let Some(surface) = self.surfaces.get_mut(&id) {
-                                            let _ = surface.send_input(clipboard.as_bytes());
-                                        }
-                                    }
+                                if let Some(surface) = self.surfaces.get_mut(&id) {
+                                    let _ = surface.send_input(clipboard.as_bytes());
                                 }
-                                continue;
                             }
-                            _ => {}
                         }
+                        continue;
                     }
 
                     // Directional navigation with Alt+Arrows
@@ -849,6 +961,8 @@ impl eframe::App for AgeMaxApp {
         // 1. Check for configuration hot reload
         if let Some(watcher) = &self.config_watcher {
             if let Some(new_cfg) = watcher.try_recv() {
+                self.font_size = new_cfg.general.font_size.clamp(9.0, 32.0);
+                self.command_palette.sync_builtins(&new_cfg.keybindings);
                 self.command_palette.set_custom_commands(&new_cfg.commands);
                 self.config = new_cfg;
             }
@@ -953,10 +1067,13 @@ impl eframe::App for AgeMaxApp {
                             .notification_store
                             .latest_unread_for_workspace(ws.id)
                             .map(|i| i.message.clone());
+                        let status = ws
+                            .active_pane_id()
+                            .and_then(|pid| self.pane_status.get(&pid).copied());
                         SidebarWorkspaceMeta {
                             unread_count,
                             latest_snippet,
-                            status: None,
+                            status,
                         }
                     })
                     .collect();
@@ -977,39 +1094,71 @@ impl eframe::App for AgeMaxApp {
                         SidebarAction::SelectWorkspace(idx) => {
                             self.active_workspace_index = idx;
                         }
-                        SidebarAction::CreateWorkspace => {
-                            let pane_id = PaneId::new();
-                            let cwd =
-                                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                            let git_branch = detect_git_branch(&cwd);
-                            let mut ws = Workspace::new(
-                                format!("Workspace {}", self.workspaces.len() + 1),
-                                cwd.clone(),
-                                pane_id,
-                            );
-                            ws.git_branch = git_branch;
-                            if let Ok(surface) =
-                                spawn_terminal_surface(TerminalSize::new(80, 24), &cwd)
-                            {
-                                self.surfaces.insert(pane_id, surface);
-                                self.osc_parsers.insert(pane_id, OscParser::new());
-                                self.pane_status.insert(pane_id, AgentStatus::Idle);
-                                self.workspaces.push(ws);
-                                self.active_workspace_index = self.workspaces.len() - 1;
-                                self.save_session();
+                        SidebarAction::CreateWorkspace => self.open_new_workspace_modal(),
+                        SidebarAction::RenameWorkspace(idx) => {
+                            if let Some(ws) = self.workspaces.get(idx) {
+                                let current_name = ws.name.clone();
+                                self.rename_modal
+                                    .open(RenameTarget::Workspace(idx), &current_name);
                             }
+                        }
+                        SidebarAction::CloseWorkspace(idx) => {
+                            self.close_workspace(idx);
                         }
                         SidebarAction::ToggleCollapse => {
                             self.is_sidebar_collapsed = !self.is_sidebar_collapsed;
                         }
+                        SidebarAction::OpenViewSettings => {
+                            self.view_settings_modal.is_open = true;
+                        }
                     }
                 }
 
-                // 2. Main content area (Tab Bar + Terminal Panes)
+                // 2. Main content area (Optional Guided Toolbar + Tab Bar + Terminal Panes)
                 ui.vertical(|ui| {
+                    let total_unread: usize = self
+                        .workspaces
+                        .iter()
+                        .map(|w| self.notification_store.unread_count_for_workspace(w.id))
+                        .sum();
+                    if let Some(tb_action) = render_top_toolbar(
+                        ui,
+                        &self.config,
+                        self.is_sidebar_collapsed,
+                        total_unread,
+                    ) {
+                        match tb_action {
+                            ToolbarAction::ToggleSidebar => {
+                                self.is_sidebar_collapsed = !self.is_sidebar_collapsed;
+                            }
+                            ToolbarAction::OpenNewWorkspace => self.open_new_workspace_modal(),
+                            ToolbarAction::NewTab => self.create_new_tab(),
+                            ToolbarAction::SplitRight => {
+                                self.split_active_pane(SplitDirection::Horizontal);
+                            }
+                            ToolbarAction::SplitDown => {
+                                self.split_active_pane(SplitDirection::Vertical);
+                            }
+                            ToolbarAction::LaunchAgy => {
+                                if let Some(pane_id) = self.active_pane_id() {
+                                    self.launch_agy_in_pane(pane_id);
+                                }
+                            }
+                            ToolbarAction::OpenCommandPalette => self.command_palette.open(),
+                            ToolbarAction::ToggleNotifications => {
+                                self.show_notifications_panel = !self.show_notifications_panel;
+                            }
+                            ToolbarAction::OpenViewSettings => {
+                                self.view_settings_modal.is_open = true;
+                            }
+                            ToolbarAction::SwitchUiMode(mode) => self.switch_ui_mode(mode),
+                        }
+                    }
+
                     let active_ws_idx = self.active_workspace_index;
+                    let show_hints = self.config.general.effective_show_shortcut_hints();
                     let tab_action = if let Some(ws) = self.workspaces.get(active_ws_idx) {
-                        render_tab_bar(ui, &ws.tabs, ws.active_tab_index)
+                        render_tab_bar(ui, &ws.tabs, ws.active_tab_index, show_hints)
                     } else {
                         None
                     };
@@ -1021,22 +1170,18 @@ impl eframe::App for AgeMaxApp {
                                     ws.active_tab_index = idx;
                                 }
                             }
-                            TabBarAction::Create => {
-                                if let Some(ws) = self.workspaces.get_mut(active_ws_idx) {
-                                    let new_pane = PaneId::new();
-                                    if let Ok(surface) =
-                                        spawn_terminal_surface(TerminalSize::new(80, 24), &ws.cwd)
-                                    {
-                                        self.surfaces.insert(new_pane, surface);
-                                        self.osc_parsers.insert(new_pane, OscParser::new());
-                                        self.pane_status.insert(new_pane, AgentStatus::Idle);
-                                        let tab_num = ws.tabs.len() + 1;
-                                        ws.tabs.push(Tab::new(
-                                            format!("Terminal {}", tab_num),
-                                            new_pane,
-                                        ));
-                                        ws.active_tab_index = ws.tabs.len() - 1;
-                                        self.save_session();
+                            TabBarAction::Create => self.create_new_tab(),
+                            TabBarAction::Rename(tab_index) => {
+                                if let Some(ws) = self.workspaces.get(active_ws_idx) {
+                                    if let Some(tab) = ws.tabs.get(tab_index) {
+                                        let current = tab.title.clone();
+                                        self.rename_modal.open(
+                                            RenameTarget::Tab {
+                                                ws_index: active_ws_idx,
+                                                tab_index,
+                                            },
+                                            &current,
+                                        );
                                     }
                                 }
                             }
@@ -1073,9 +1218,15 @@ impl eframe::App for AgeMaxApp {
                     self.handle_input(ui.ctx(), content_rect);
 
                     // 3. Render panes inside the tab layout
+                    let show_pane_headers = self.config.general.effective_show_pane_headers();
+                    let show_hints = self.config.general.effective_show_shortcut_hints();
+                    let mut pending_pane_action: Option<PaneHeaderAction> = None;
+                    let mut clicked_focus_pane: Option<PaneId> = None;
+
                     if let Some(ws) = self.workspaces.get(active_ws_idx) {
                         if let Some(tab) = ws.active_tab() {
                             let focused_pane = tab.active_pane;
+                            let is_zoomed = tab.zoomed_pane.is_some();
                             let pane_rects = if let Some(zoomed) = tab.zoomed_pane {
                                 let mut m = HashMap::new();
                                 m.insert(zoomed, content_rect);
@@ -1084,9 +1235,8 @@ impl eframe::App for AgeMaxApp {
                                 tab.layout.compute_rects(content_rect)
                             };
 
-                            let painter = ui.painter();
                             let font_id = FontId::monospace(self.font_size);
-                            let sample = painter.layout_no_wrap(
+                            let sample = ui.painter().layout_no_wrap(
                                 "M".to_string(),
                                 font_id.clone(),
                                 Color32::WHITE,
@@ -1101,17 +1251,11 @@ impl eframe::App for AgeMaxApp {
                                     Vec2::new(rect.width(), rect.height()),
                                 );
 
-                                // Check click to focus
-                                if ui.input(|i| i.pointer.any_click()) {
+                                // Check click inside pane (outside modals)
+                                if !self.is_modal_open() && ui.input(|i| i.pointer.any_click()) {
                                     if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
                                         if egui_rect.contains(pos) {
-                                            if let Some(ws_mut) =
-                                                self.workspaces.get_mut(active_ws_idx)
-                                            {
-                                                if let Some(tab_mut) = ws_mut.active_tab_mut() {
-                                                    tab_mut.active_pane = pane_id;
-                                                }
-                                            }
+                                            clicked_focus_pane = Some(pane_id);
                                         }
                                     }
                                 }
@@ -1133,25 +1277,51 @@ impl eframe::App for AgeMaxApp {
                                     _ => (Color32::from_rgb(32, 35, 45), 1.0),
                                 };
 
-                                painter.rect_stroke(
+                                ui.painter().rect_stroke(
                                     egui_rect,
                                     2.0,
                                     Stroke::new(stroke_width, border_color),
                                     StrokeKind::Inside,
                                 );
 
-                                // Calculate terminal rows and cols for this pane
+                                // Optional Guided mode slim 26px per-pane header bar
+                                let header_h = if show_pane_headers { 26.0 } else { 0.0 };
+                                if show_pane_headers && egui_rect.height() > header_h + 40.0 {
+                                    let header_rect = Rect::from_min_max(
+                                        egui_rect.min,
+                                        Pos2::new(egui_rect.max.x, egui_rect.min.y + header_h),
+                                    );
+                                    if let Some(act) = render_pane_header(
+                                        ui,
+                                        PaneHeaderProps {
+                                            header_rect,
+                                            pane_id,
+                                            status: pane_status,
+                                            is_focused,
+                                            is_zoomed,
+                                            show_hints,
+                                            keybindings: &self.config.keybindings,
+                                        },
+                                    ) {
+                                        pending_pane_action = Some(act);
+                                    }
+                                }
+
+                                // Calculate terminal rows and cols below optional header
                                 let pad = 4.0;
+                                let term_top = rect.min.y + header_h;
+                                let term_h = (rect.height() - header_h).max(40.0);
                                 let inner_w = (rect.width() - (pad * 2.0)).max(50.0);
-                                let inner_h = (rect.height() - (pad * 2.0)).max(50.0);
+                                let inner_h = (term_h - (pad * 2.0)).max(32.0);
                                 let cols = (inner_w / self.char_width).floor() as u16;
                                 let rows = (inner_h / self.char_height).floor() as u16;
 
+                                let painter = ui.painter();
                                 if let Some(surface) = self.surfaces.get_mut(&pane_id) {
                                     let new_size = TerminalSize::new(cols, rows);
                                     let _ = surface.resize(new_size);
 
-                                    let origin = Pos2::new(rect.min.x + pad, rect.min.y + pad);
+                                    let origin = Pos2::new(rect.min.x + pad, term_top + pad);
                                     let cur_rows = surface.rows().min(rows as usize);
                                     let cur_cols = surface.cols().min(cols as usize);
 
@@ -1269,6 +1439,32 @@ impl eframe::App for AgeMaxApp {
                             }
                         }
                     }
+
+                    if let Some(pid) = clicked_focus_pane {
+                        self.focus_pane_in_active_tab(pid);
+                    }
+
+                    if let Some(pane_action) = pending_pane_action {
+                        match pane_action {
+                            PaneHeaderAction::LaunchAgy(pid) => self.launch_agy_in_pane(pid),
+                            PaneHeaderAction::SplitRight(pid) => {
+                                self.focus_pane_in_active_tab(pid);
+                                self.split_active_pane(SplitDirection::Horizontal);
+                            }
+                            PaneHeaderAction::SplitDown(pid) => {
+                                self.focus_pane_in_active_tab(pid);
+                                self.split_active_pane(SplitDirection::Vertical);
+                            }
+                            PaneHeaderAction::ToggleZoom(pid) => {
+                                self.focus_pane_in_active_tab(pid);
+                                self.toggle_zoom_active();
+                            }
+                            PaneHeaderAction::Close(pid) => {
+                                self.focus_pane_in_active_tab(pid);
+                                self.close_active_pane();
+                            }
+                        }
+                    }
                 });
 
                 // 3. Optional Right-Side Notification History Panel (Ctrl+Shift+N)
@@ -1354,7 +1550,93 @@ impl eframe::App for AgeMaxApp {
                 if let Some(action) = self.command_palette.show(ui.ctx()) {
                     self.execute_palette_action(action);
                 }
+
+                // 5. New Workspace Modal (Native Folder Picker + Name)
+                if let Some((name, path, launch_agy)) = self.new_workspace_modal.show(ui.ctx()) {
+                    let _ = self.create_workspace_in_dir(name, path, launch_agy);
+                }
+
+                // 6. Rename Workspace / Tab Modal
+                if let Some((target, new_name)) = self.rename_modal.show(ui.ctx()) {
+                    match target {
+                        RenameTarget::Workspace(idx) => {
+                            if let Some(ws) = self.workspaces.get_mut(idx) {
+                                if ws.rename(new_name) {
+                                    self.save_session();
+                                }
+                            }
+                        }
+                        RenameTarget::Tab {
+                            ws_index,
+                            tab_index,
+                        } => {
+                            if let Some(ws) = self.workspaces.get_mut(ws_index) {
+                                if let Some(tab) = ws.tabs.get_mut(tab_index) {
+                                    if tab.rename(new_name) {
+                                        self.save_session();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 7. Interactive View Mode & Shortcuts Reference Modal
+                if self.view_settings_modal.show(ui.ctx(), &mut self.config) {
+                    let _ = self.config.save_default();
+                }
             });
         });
+    }
+}
+
+fn egui_key_to_code(key: Key) -> Option<KeyCode> {
+    match key {
+        Key::A => Some(KeyCode::Char('A')),
+        Key::B => Some(KeyCode::Char('B')),
+        Key::C => Some(KeyCode::Char('C')),
+        Key::D => Some(KeyCode::Char('D')),
+        Key::E => Some(KeyCode::Char('E')),
+        Key::F => Some(KeyCode::Char('F')),
+        Key::G => Some(KeyCode::Char('G')),
+        Key::H => Some(KeyCode::Char('H')),
+        Key::I => Some(KeyCode::Char('I')),
+        Key::J => Some(KeyCode::Char('J')),
+        Key::K => Some(KeyCode::Char('K')),
+        Key::L => Some(KeyCode::Char('L')),
+        Key::M => Some(KeyCode::Char('M')),
+        Key::N => Some(KeyCode::Char('N')),
+        Key::O => Some(KeyCode::Char('O')),
+        Key::P => Some(KeyCode::Char('P')),
+        Key::Q => Some(KeyCode::Char('Q')),
+        Key::R => Some(KeyCode::Char('R')),
+        Key::S => Some(KeyCode::Char('S')),
+        Key::T => Some(KeyCode::Char('T')),
+        Key::U => Some(KeyCode::Char('U')),
+        Key::V => Some(KeyCode::Char('V')),
+        Key::W => Some(KeyCode::Char('W')),
+        Key::X => Some(KeyCode::Char('X')),
+        Key::Y => Some(KeyCode::Char('Y')),
+        Key::Z => Some(KeyCode::Char('Z')),
+        Key::Num0 => Some(KeyCode::Char('0')),
+        Key::Num1 => Some(KeyCode::Char('1')),
+        Key::Num2 => Some(KeyCode::Char('2')),
+        Key::Num3 => Some(KeyCode::Char('3')),
+        Key::Num4 => Some(KeyCode::Char('4')),
+        Key::Num5 => Some(KeyCode::Char('5')),
+        Key::Num6 => Some(KeyCode::Char('6')),
+        Key::Num7 => Some(KeyCode::Char('7')),
+        Key::Num8 => Some(KeyCode::Char('8')),
+        Key::Num9 => Some(KeyCode::Char('9')),
+        Key::Enter => Some(KeyCode::Enter),
+        Key::Escape => Some(KeyCode::Escape),
+        Key::Tab => Some(KeyCode::Tab),
+        Key::Backspace => Some(KeyCode::Backspace),
+        Key::Space => Some(KeyCode::Space),
+        Key::ArrowUp => Some(KeyCode::ArrowUp),
+        Key::ArrowDown => Some(KeyCode::ArrowDown),
+        Key::ArrowLeft => Some(KeyCode::ArrowLeft),
+        Key::ArrowRight => Some(KeyCode::ArrowRight),
+        _ => None,
     }
 }

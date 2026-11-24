@@ -21,6 +21,10 @@ This document defines user personas, scenarios, and acceptance criteria for **Ag
    - Prefers keyboard-driven navigation, tiling window managers, and terminal multiplexers.
    - Scripts his daily setup via PowerShell and expects an IPC CLI to orchestrate panes, send commands, and query status.
 
+4. **Sam (Non-Technical Creator / Solo Founder)**:
+   - Wants AI coding agents (`agy`) to help build websites, automations, and scripts, but is uncomfortable memorizing terminal flags or keyboard chords.
+   - Prefers clicking clear buttons (*Start Agent*, *Split Screen*, *Choose Folder*), visual settings, mouse Copy/Paste, and friendly status badges—while still letting power users like Marcus switch to Minimal view.
+
 ---
 
 ## User Stories
@@ -83,3 +87,20 @@ This document defines user personas, scenarios, and acceptance criteria for **Ag
 - **Acceptance Criteria**:
   - Closing a pane terminates the ConPTY process and its entire process tree via Windows Job Objects (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`).
   - Verifiable via Task Manager / Process Explorer: zero orphaned Node/Python/git processes after pane closure.
+
+### US-07: Choosing Between Guided Buttons and Minimal Terminal Chrome
+- **As** Sam (or Marcus),
+- **I want to** toggle between a "Guided" UI mode (with top toolbar buttons, per-pane headers, status pills, and shortcut hints) and a "Minimal" UI mode without losing any keyboard shortcuts,
+- **So that** newcomers get discoverable mouse controls while terminal minimalists keep a clean, zero-chrome canvas.
+- **Acceptance Criteria**:
+  - Settings (`config.toml` and UI switch) allow choosing `ui_mode = "guided"` or `"minimal"` plus per-element overrides (`show_toolbar`, `show_pane_headers`).
+  - Switching UI mode updates the layout immediately without restarting terminals.
+  - All existing keyboard shortcuts remain active and configurable in both modes.
+
+### US-08: Picking a Project Folder Without `cd` Commands
+- **As** Sam,
+- **I want to** click `+ New Workspace`, browse to my project folder using the standard Windows folder dialog, give it a friendly name, and optionally start `agy` inside it,
+- **So that** I don't have to type Windows file paths into a command line.
+- **Acceptance Criteria**:
+  - `+ New Workspace` opens a creation dialog with a native Windows Folder Picker button.
+  - Users can rename workspaces and tabs inline from the UI.
