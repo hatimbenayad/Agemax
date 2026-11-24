@@ -36,6 +36,15 @@ pub struct QuotaSummary {
     pub next_reset: Option<String>,
 }
 
+/// High-level launch modes selectable without memorizing CLI flags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentLaunchPreset {
+    NewSession,
+    SafePlanMode,
+    ContinueLast,
+    ResumeConversation(String),
+}
+
 /// Abstract adapter trait for hosting CLI agents.
 pub trait AgentAdapter: Send + Sync {
     fn name(&self) -> &'static str;
@@ -76,6 +85,37 @@ impl AntigravityAdapter {
     pub fn with_binary(binary: PathBuf) -> Self {
         Self {
             custom_binary: Some(binary),
+        }
+    }
+
+    /// Build a launch command for one of the plain-English user presets.
+    pub fn build_preset_command(
+        &self,
+        preset: AgentLaunchPreset,
+        profile: &ProfileConfig,
+        working_dir: &Path,
+    ) -> Result<LaunchCommand, AdapterError> {
+        let mut cmd = self.build_command(profile, working_dir)?;
+        cmd.args = match preset {
+            AgentLaunchPreset::NewSession => Vec::new(),
+            AgentLaunchPreset::SafePlanMode => vec!["--mode".to_string(), "plan".to_string()],
+            AgentLaunchPreset::ContinueLast => vec!["-c".to_string()],
+            AgentLaunchPreset::ResumeConversation(id) => {
+                vec!["--conversation".to_string(), id]
+            }
+        };
+        Ok(cmd)
+    }
+
+    /// Format the interactive shell command string for Mode A in-pane invocation.
+    pub fn shell_line_for_preset(preset: &AgentLaunchPreset) -> String {
+        match preset {
+            AgentLaunchPreset::NewSession => "agy".to_string(),
+            AgentLaunchPreset::SafePlanMode => "agy --mode plan".to_string(),
+            AgentLaunchPreset::ContinueLast => "agy -c".to_string(),
+            AgentLaunchPreset::ResumeConversation(id) => {
+                format!("agy --conversation {}", id)
+            }
         }
     }
 }

@@ -35,6 +35,67 @@ fn find_in_path(binary: &str) -> Option<PathBuf> {
     None
 }
 
+/// Friendly shell identifiers and labels exposed in Settings UI.
+pub fn available_shells() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("auto", "Auto (PowerShell 7 -> Windows PowerShell)"),
+        ("pwsh", "PowerShell 7 (pwsh.exe)"),
+        ("powershell", "Windows PowerShell (powershell.exe)"),
+        ("cmd", "Command Prompt (cmd.exe)"),
+        ("wsl", "Windows Subsystem for Linux (wsl.exe)"),
+    ]
+}
+
+/// Resolve a configured `default_shell` preference (`"auto"`, `"pwsh"`, `"powershell"`, `"cmd"`, `"wsl"`, or custom path).
+pub fn resolve_shell_program(preference: Option<&str>) -> PathBuf {
+    let pref = preference.map(str::trim).filter(|s| !s.is_empty());
+    match pref.map(|s| s.to_ascii_lowercase()).as_deref() {
+        None | Some("auto") => detect_default_shell(),
+        Some("pwsh") => find_in_path("pwsh.exe").unwrap_or_else(detect_default_shell),
+        Some("powershell") => {
+            #[cfg(windows)]
+            {
+                let sys_root =
+                    std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+                let ps_path = PathBuf::from(&sys_root)
+                    .join("System32")
+                    .join("WindowsPowerShell")
+                    .join("v1.0")
+                    .join("powershell.exe");
+                if ps_path.exists() {
+                    return ps_path;
+                }
+            }
+            find_in_path("powershell.exe").unwrap_or_else(detect_default_shell)
+        }
+        Some("cmd") => {
+            #[cfg(windows)]
+            {
+                let sys_root =
+                    std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+                let cmd_path = PathBuf::from(&sys_root).join("System32").join("cmd.exe");
+                if cmd_path.exists() {
+                    return cmd_path;
+                }
+            }
+            PathBuf::from("cmd.exe")
+        }
+        Some("wsl") => find_in_path("wsl.exe").unwrap_or_else(detect_default_shell),
+        Some(_) => {
+            if let Some(raw) = pref {
+                let candidate = PathBuf::from(raw);
+                if candidate.is_file() {
+                    return candidate;
+                }
+                if let Some(found) = find_in_path(raw) {
+                    return found;
+                }
+            }
+            detect_default_shell()
+        }
+    }
+}
+
 /// Detect default shell in order of preference:
 /// 1. PowerShell 7 (`pwsh.exe`)
 /// 2. Windows PowerShell (`powershell.exe`)

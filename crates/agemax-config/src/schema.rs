@@ -35,6 +35,9 @@ pub struct GeneralConfig {
     pub show_toolbar: Option<bool>,
     pub show_pane_headers: Option<bool>,
     pub show_shortcut_hints: Option<bool>,
+    pub enable_toast_notifications: bool,
+    pub enable_taskbar_flash: bool,
+    pub enable_onboarding_banner: bool,
 }
 
 impl Default for GeneralConfig {
@@ -47,6 +50,9 @@ impl Default for GeneralConfig {
             show_toolbar: None,
             show_pane_headers: None,
             show_shortcut_hints: None,
+            enable_toast_notifications: true,
+            enable_taskbar_flash: true,
+            enable_onboarding_banner: true,
         }
     }
 }

@@ -1,7 +1,6 @@
 use crate::folder_picker::spawn_folder_picker_async;
 pub use agemax_config::keybindings::KeybindingsConfig;
 use agemax_config::schema::{AgeMaxConfig, UiMode};
-use agemax_config::theme::{ThemeConfig, ThemePreset};
 use agemax_core::layout::PaneId;
 use agemax_core::status::AgentStatus;
 use crossbeam_channel::Receiver;
@@ -318,224 +317,6 @@ impl RenameModal {
     }
 }
 
-/// Interactive View Modes & Shortcuts reference modal.
-#[derive(Debug, Default)]
-pub struct ViewSettingsModal {
-    pub is_open: bool,
-}
-
-impl ViewSettingsModal {
-    pub fn show(&mut self, ctx: &egui::Context, config: &mut AgeMaxConfig) -> bool {
-        if !self.is_open {
-            return false;
-        }
-        if ctx.input(|i| i.key_pressed(Key::Escape)) {
-            self.is_open = false;
-            return false;
-        }
-
-        let mut changed = false;
-        let mut should_close = false;
-        let pos = centered_modal_pos(ctx, 500.0, 490.0);
-
-        egui::Window::new("view_settings_modal")
-            .fixed_pos(pos)
-            .fixed_size(Vec2::new(500.0, 480.0))
-            .title_bar(false)
-            .resizable(false)
-            .collapsible(false)
-            .frame(modal_frame())
-            .show(ctx, |ui| {
-                ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new("View Mode & Keyboard Shortcuts")
-                                .size(15.0)
-                                .color(Color32::WHITE)
-                                .strong(),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("Close").clicked() {
-                                should_close = true;
-                            }
-                        });
-                    });
-                    ui.add_space(4.0);
-                    ui.label(
-                        egui::RichText::new(
-                            "Choose between Guided buttons for mouse discovery or classic Minimal terminal chrome. Your shortcuts always keep working.",
-                        )
-                        .size(11.5)
-                        .color(Color32::from_rgb(155, 165, 185)),
-                    );
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(6.0);
-
-                    ui.label(
-                        egui::RichText::new("UI Chrome Preset")
-                            .size(12.5)
-                            .color(Color32::WHITE)
-                            .strong(),
-                    );
-                    ui.horizontal(|ui| {
-                        if ui
-                            .selectable_label(
-                                config.general.ui_mode == UiMode::Guided,
-                                "Guided (Buttons, Pane Headers & Tips)",
-                            )
-                            .clicked()
-                            && config.general.ui_mode != UiMode::Guided
-                        {
-                            config.general.ui_mode = UiMode::Guided;
-                            config.general.show_toolbar = None;
-                            config.general.show_pane_headers = None;
-                            config.general.show_shortcut_hints = None;
-                            changed = true;
-                        }
-                        if ui
-                            .selectable_label(
-                                config.general.ui_mode == UiMode::Minimal,
-                                "Minimal (Distraction-Free Terminals)",
-                            )
-                            .clicked()
-                            && config.general.ui_mode != UiMode::Minimal
-                        {
-                            config.general.ui_mode = UiMode::Minimal;
-                            config.general.show_toolbar = None;
-                            config.general.show_pane_headers = None;
-                            config.general.show_shortcut_hints = None;
-                            changed = true;
-                        }
-                    });
-
-                    ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new("Fine-Grained Visibility Overrides")
-                            .size(12.0)
-                            .color(Color32::from_rgb(200, 210, 230)),
-                    );
-                    let mut toolbar_val = config.general.effective_show_toolbar();
-                    if ui.checkbox(&mut toolbar_val, "Show Top Action Toolbar").changed() {
-                        config.general.show_toolbar = Some(toolbar_val);
-                        changed = true;
-                    }
-                    let mut headers_val = config.general.effective_show_pane_headers();
-                    if ui
-                        .checkbox(&mut headers_val, "Show Per-Pane Headers & Quick Buttons")
-                        .changed()
-                    {
-                        config.general.show_pane_headers = Some(headers_val);
-                        changed = true;
-                    }
-                    let mut hints_val = config.general.effective_show_shortcut_hints();
-                    if ui
-                        .checkbox(&mut hints_val, "Show Shortcut Tooltips & Hints")
-                        .changed()
-                    {
-                        config.general.show_shortcut_hints = Some(hints_val);
-                        changed = true;
-                    }
-
-                    ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new("Theme Preset")
-                            .size(12.5)
-                            .color(Color32::WHITE)
-                            .strong(),
-                    );
-                    ui.horizontal(|ui| {
-                        let midnight = ThemeConfig::from_preset(ThemePreset::MidnightDark);
-                        let high_contrast = ThemeConfig::from_preset(ThemePreset::HighContrast);
-                        let soft_light = ThemeConfig::from_preset(ThemePreset::SoftLight);
-
-                        if ui
-                            .selectable_label(config.theme == midnight, "Midnight Dark")
-                            .clicked()
-                        {
-                            config.theme = midnight;
-                            changed = true;
-                        }
-                        if ui
-                            .selectable_label(config.theme == high_contrast, "High Contrast")
-                            .clicked()
-                        {
-                            config.theme = high_contrast;
-                            changed = true;
-                        }
-                        if ui
-                            .selectable_label(config.theme == soft_light, "Soft Light")
-                            .clicked()
-                        {
-                            config.theme = soft_light;
-                            changed = true;
-                        }
-                    });
-
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.label("Terminal Font Size:");
-                        if ui
-                            .add(egui::Slider::new(&mut config.general.font_size, 10.0..=26.0).step_by(1.0))
-                            .changed()
-                        {
-                            changed = true;
-                        }
-                    });
-
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new("Active Keyboard Shortcuts (editable in config.toml)")
-                            .size(12.5)
-                            .color(Color32::WHITE)
-                            .strong(),
-                    );
-                    ui.add_space(4.0);
-
-                    let kb = &config.keybindings;
-                    let rows = [
-                        ("Command Palette", kb.command_palette.as_str()),
-                        ("New Tab", kb.new_tab.as_str()),
-                        ("Split Pane Right", kb.split_horizontal.as_str()),
-                        ("Split Pane Down", kb.split_vertical.as_str()),
-                        ("Close Active Pane", kb.close_pane.as_str()),
-                        ("Zoom / Unzoom Pane", kb.zoom_pane.as_str()),
-                        ("Toggle Sidebar", kb.toggle_sidebar.as_str()),
-                        ("Jump to Waiting Agent", kb.jump_unread.as_str()),
-                        ("Toggle Alerts Panel", kb.toggle_notifications.as_str()),
-                        ("Focus Adjacent Pane", "Alt + Arrow Keys"),
-                    ];
-                    egui::Grid::new("shortcuts_ref_grid")
-                        .num_columns(2)
-                        .spacing([28.0, 4.0])
-                        .show(ui, |ui| {
-                            for (label, chord) in rows {
-                                ui.label(
-                                    egui::RichText::new(label)
-                                        .size(11.5)
-                                        .color(Color32::from_rgb(200, 205, 220)),
-                                );
-                                ui.label(
-                                    egui::RichText::new(chord)
-                                        .size(11.5)
-                                        .monospace()
-                                        .color(Color32::from_rgb(130, 185, 255)),
-                                );
-                                ui.end_row();
-                            }
-                        });
-                });
-            });
-
-        if should_close {
-            self.is_open = false;
-        }
-        changed
-    }
-}
-
 /// Render the Guided Mode top utility toolbar above the tab strip.
 pub fn render_top_toolbar(
     ui: &mut egui::Ui,
@@ -627,9 +408,9 @@ pub fn render_top_toolbar(
                 }
 
                 if hint_tooltip(
-                    ui.button("? Shortcuts"),
+                    ui.button("⚙ Settings"),
                     show_hints,
-                    "Configure UI View & inspect keyboard shortcuts",
+                    "Open visual Settings, UI View Mode & Shortcuts",
                 )
                 .clicked()
                 {
@@ -767,7 +548,7 @@ fn hint_tooltip(response: egui::Response, show_hints: bool, hint: &str) -> egui:
     }
 }
 
-fn centered_modal_pos(ctx: &egui::Context, width: f32, height: f32) -> Pos2 {
+pub(crate) fn centered_modal_pos(ctx: &egui::Context, width: f32, height: f32) -> Pos2 {
     let screen = ctx
         .input(|i| i.raw.screen_rect)
         .unwrap_or(Rect::from_min_size(Pos2::ZERO, Vec2::new(1150.0, 720.0)));
@@ -777,7 +558,7 @@ fn centered_modal_pos(ctx: &egui::Context, width: f32, height: f32) -> Pos2 {
     )
 }
 
-fn modal_frame() -> egui::Frame {
+pub(crate) fn modal_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(Color32::from_rgb(24, 27, 38))
         .corner_radius(8.0)
