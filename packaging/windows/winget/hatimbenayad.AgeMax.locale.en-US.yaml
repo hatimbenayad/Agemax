@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: hatimbenayad.AgeMax
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: Age Max Contributors
+PublisherUrl: https://github.com/hatimbenayad/Agemax
+PublisherSupportUrl: https://github.com/hatimbenayad/Agemax/issues
+PackageName: Age Max
+PackageUrl: https://github.com/hatimbenayad/Agemax
+License: MIT OR Apache-2.0
+LicenseUrl: https://github.com/hatimbenayad/Agemax/blob/main/LICENSE
+ShortDescription: Native Windows vertical terminal multiplexer and workspace orchestrator for Antigravity (agy) CLI agents.
+Tags:
+  - terminal
+  - multiplexer
+  - conpty
+  - antigravity
+  - agy
+  - rust
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

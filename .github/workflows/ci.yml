@@ -45,6 +45,10 @@ jobs:
           mkdir release
           cp target/release/agemax-app.exe release/agemax-app.exe
           cp target/release/agemax.exe release/agemax.exe
+          cp assets/agemax.ico release/agemax.ico
+          cp LICENSE release/LICENSE
+          cp packaging/windows/open-in-agemax-install.ps1 release/open-in-agemax-install.ps1
+          cp packaging/windows/open-in-agemax-uninstall.ps1 release/open-in-agemax-uninstall.ps1
           Compress-Archive -Path release/* -DestinationPath target/agemax-windows-x64.zip
 
       - name: Upload Release Artifact

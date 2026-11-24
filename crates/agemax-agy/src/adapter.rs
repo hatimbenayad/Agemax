@@ -118,6 +118,21 @@ impl AntigravityAdapter {
             }
         }
     }
+
+    /// Build the `agy acp --stdio` command for stretch ACP card panels (Unit 7 / Unit 11).
+    pub fn build_acp_command(profile: &ProfileConfig, working_dir: &Path) -> LaunchCommand {
+        let adapter = Self::new();
+        let mut cmd = adapter
+            .build_command(profile, working_dir)
+            .unwrap_or(LaunchCommand {
+                program: PathBuf::from("agy.exe"),
+                args: Vec::new(),
+                env: HashMap::new(),
+                cwd: working_dir.to_path_buf(),
+            });
+        cmd.args = vec!["acp".to_string(), "--stdio".to_string()];
+        cmd
+    }
 }
 
 impl AgentAdapter for AntigravityAdapter {

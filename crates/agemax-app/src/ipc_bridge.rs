@@ -1,7 +1,6 @@
 use agemax_core::layout::{PaneId, SplitDirection, WorkspaceId};
 use agemax_core::status::AgentStatus;
 use agemax_ipc::protocol::{JsonRpcRequest, JsonRpcResponse};
-use agemax_ipc::security::get_default_pipe_name;
 use agemax_ipc::server::IpcServer;
 use eframe::egui;
 use serde_json::Value;
@@ -58,9 +57,17 @@ pub enum IpcAppCommand {
     ProfileList {
         reply: oneshot::Sender<Value>,
     },
+    Activate {
+        cwd: Option<String>,
+        reply: oneshot::Sender<Value>,
+    },
 }
 
-pub fn start_ipc_server(cmd_tx: crossbeam_channel::Sender<IpcAppCommand>, egui_ctx: egui::Context) {
+pub fn start_ipc_server(
+    pipe_name: String,
+    cmd_tx: crossbeam_channel::Sender<IpcAppCommand>,
+    egui_ctx: egui::Context,
+) {
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -74,7 +81,6 @@ pub fn start_ipc_server(cmd_tx: crossbeam_channel::Sender<IpcAppCommand>, egui_c
         };
 
         rt.block_on(async move {
-            let pipe_name = get_default_pipe_name();
             let cmd_sender = cmd_tx.clone();
             let ctx = egui_ctx.clone();
 
@@ -211,6 +217,13 @@ pub fn start_ipc_server(cmd_tx: crossbeam_channel::Sender<IpcAppCommand>, egui_c
                             }
                         }
                         "profile.list" => IpcAppCommand::ProfileList { reply: reply_tx },
+                        "app.activate" => {
+                            let cwd = req.params["cwd"].as_str().map(|s| s.to_string());
+                            IpcAppCommand::Activate {
+                                cwd,
+                                reply: reply_tx,
+                            }
+                        }
                         _ => return JsonRpcResponse::error(req_id, -32601, "Method not found"),
                     };
 

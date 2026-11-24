@@ -86,6 +86,12 @@ enum Commands {
 
     #[command(subcommand, about = "List or inspect profiles")]
     Profiles(ProfileCommands),
+
+    #[command(about = "Focus the running Age Max window and optionally open a folder")]
+    Activate {
+        #[arg(short, long, help = "Directory to focus or open as a workspace")]
+        cwd: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -242,6 +248,13 @@ async fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&res)?);
             }
         },
+        Commands::Activate { cwd } => {
+            let res = client
+                .call("app.activate", serde_json::json!({ "cwd": cwd }))
+                .await
+                .with_context(|| format!("Failed to connect to Age Max on {pipe_name}"))?;
+            println!("{}", serde_json::to_string_pretty(&res)?);
+        }
     }
 
     Ok(())

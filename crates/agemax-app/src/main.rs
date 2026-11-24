@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app_icon;
 mod chrome_ui;
 mod command_palette;
 mod folder_picker;
@@ -24,6 +25,8 @@ use agemax_core::session::{
 };
 use agemax_core::status::AgentStatus;
 use agemax_core::workspace::{Tab, Workspace};
+use agemax_ipc::activation::{try_activate_existing_instance, LaunchArgs};
+use agemax_ipc::security::get_default_pipe_name;
 use agemax_term::metadata::detect_git_branch;
 use agemax_term::pty::{resolve_shell_program, PtyConfig};
 use agemax_term::surface::TerminalSurface;
@@ -54,9 +57,21 @@ use tab_bar::{render_tab_bar, TabBarAction};
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt::init();
 
+    let launch_args = LaunchArgs::parse_from(std::env::args_os());
+    let pipe_name = launch_args
+        .pipe
+        .clone()
+        .unwrap_or_else(get_default_pipe_name);
+
+    if try_activate_existing_instance(&pipe_name, launch_args.cwd.as_deref()) {
+        tracing::info!("Forwarded activation to running Age Max instance on {pipe_name}");
+        return Ok(());
+    }
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Age Max - Native Agent Multiplexer")
+            .with_icon(app_icon::window_icon())
             .with_inner_size([1150.0, 720.0])
             .with_min_inner_size([450.0, 320.0]),
         ..Default::default()
@@ -65,9 +80,13 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "AgeMax",
         native_options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             configure_fonts(&cc.egui_ctx);
-            Ok(Box::new(AgeMaxApp::new(Some(cc))))
+            Ok(Box::new(AgeMaxApp::new_with_launch(
+                Some(cc),
+                pipe_name,
+                launch_args,
+            )))
         }),
     )
 }
@@ -126,6 +145,7 @@ pub struct AgeMaxApp {
     active_split_drag: Option<ActiveSplitDrag>,
     context_menu: ContextMenuState,
     last_light_visuals: Option<bool>,
+    pending_window_activate: bool,
     show_notifications_panel: bool,
     is_sidebar_collapsed: bool,
     font_size: f32,
@@ -143,15 +163,30 @@ impl Default for AgeMaxApp {
 
 impl AgeMaxApp {
     pub fn new(cc: Option<&eframe::CreationContext>) -> Self {
+        Self::new_with_launch(cc, get_default_pipe_name(), LaunchArgs::default())
+    }
+
+    pub fn new_with_launch(
+        cc: Option<&eframe::CreationContext>,
+        pipe_name: String,
+        launch_args: LaunchArgs,
+    ) -> Self {
         let start_time = Instant::now();
         let initial_pane = PaneId::new();
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let explicit_dir = launch_args.cwd.filter(|p| p.is_dir());
+        let ws_name = explicit_dir
+            .as_ref()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| "Main Workspace".to_string());
+        let cwd = explicit_dir
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let git_branch = detect_git_branch(&cwd);
 
         let mut config = AgeMaxConfig::load_or_create_default();
         config.merge_workspace_config(&cwd);
 
-        let mut initial_workspace = Workspace::new("Main Workspace", cwd.clone(), initial_pane);
+        let mut initial_workspace = Workspace::new(ws_name, cwd.clone(), initial_pane);
         initial_workspace.git_branch = git_branch;
 
         let initial_surface = spawn_terminal_surface(
@@ -174,7 +209,7 @@ impl AgeMaxApp {
         let (ipc_tx, ipc_rx) = crossbeam_channel::unbounded();
         let mut preflight = PreflightState::new();
         if let Some(ctx_container) = cc {
-            start_ipc_server(ipc_tx, ctx_container.egui_ctx.clone());
+            start_ipc_server(pipe_name, ipc_tx, ctx_container.egui_ctx.clone());
             preflight.trigger_check(
                 config.general.default_shell.clone(),
                 Some(ctx_container.egui_ctx.clone()),
@@ -216,6 +251,7 @@ impl AgeMaxApp {
             active_split_drag: None,
             context_menu: ContextMenuState::default(),
             last_light_visuals: None,
+            pending_window_activate: false,
             show_notifications_panel: false,
             is_sidebar_collapsed: false,
             font_size: initial_font_size,
@@ -1059,6 +1095,34 @@ impl AgeMaxApp {
                     .collect();
                 let _ = reply.send(serde_json::json!(profiles));
             }
+            IpcAppCommand::Activate { cwd, reply } => {
+                if let Some(dir_str) = cwd {
+                    let target_dir = PathBuf::from(&dir_str);
+                    if target_dir.is_dir() {
+                        if let Some(pos) = self
+                            .workspaces
+                            .iter()
+                            .position(|ws| paths_match(&ws.cwd, &target_dir))
+                        {
+                            self.active_workspace_index = pos;
+                        } else {
+                            let ws_name = target_dir
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .filter(|n| !n.trim().is_empty())
+                                .unwrap_or_else(|| {
+                                    format!("Workspace {}", self.workspaces.len() + 1)
+                                });
+                            let _ = self.create_workspace_in_dir(ws_name, target_dir, false);
+                        }
+                    }
+                }
+                self.pending_window_activate = true;
+                let _ = reply.send(serde_json::json!({
+                    "activated": true,
+                    "active_workspace": self.active_workspace_index
+                }));
+            }
         }
     }
 
@@ -1340,6 +1404,14 @@ impl eframe::App for AgeMaxApp {
         // 2. Process pending IPC commands
         while let Ok(cmd) = self.ipc_rx.try_recv() {
             self.handle_ipc_command(cmd);
+        }
+
+        if self.pending_window_activate {
+            self.pending_window_activate = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            self.notification_service.activate_window();
+            ctx.request_repaint();
         }
 
         // 3. Process output for all active surfaces and parse OSC sequences
@@ -2393,6 +2465,13 @@ impl eframe::App for AgeMaxApp {
                 }
             });
         });
+    }
+}
+
+fn paths_match(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
     }
 }
 
