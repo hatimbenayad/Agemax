@@ -30,6 +30,36 @@ impl Default for KeybindingsConfig {
     }
 }
 
+impl KeybindingsConfig {
+    /// Validate every configured shortcut for parseability and terminal Ctrl+C safety.
+    pub fn validate_all(&self) -> Result<(), String> {
+        let bindings = [
+            ("New Tab", &self.new_tab),
+            ("Split Right", &self.split_horizontal),
+            ("Split Down", &self.split_vertical),
+            ("Close Pane", &self.close_pane),
+            ("Zoom Pane", &self.zoom_pane),
+            ("Toggle Sidebar", &self.toggle_sidebar),
+            ("Command Palette", &self.command_palette),
+            ("Jump to Waiting Agent", &self.jump_unread),
+            ("Toggle Alerts", &self.toggle_notifications),
+        ];
+
+        for (label, raw) in bindings {
+            if !validate_keybinding_safety(raw) {
+                return Err(format!(
+                    "'{}' cannot use reserved terminal signal shortcut '{}'",
+                    label, raw
+                ));
+            }
+            if KeyChord::parse(raw).is_none() {
+                return Err(format!("'{}' has invalid shortcut syntax '{}'", label, raw));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Platform-independent key identifier for matching shortcut chords.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyCode {

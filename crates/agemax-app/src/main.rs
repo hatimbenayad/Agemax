@@ -6,6 +6,7 @@ mod folder_picker;
 mod ipc_bridge;
 mod mouse_ux;
 mod notification_win;
+mod onboarding_settings;
 mod sidebar;
 mod tab_bar;
 
@@ -24,12 +25,12 @@ use agemax_core::session::{
 use agemax_core::status::AgentStatus;
 use agemax_core::workspace::{Tab, Workspace};
 use agemax_term::metadata::detect_git_branch;
-use agemax_term::pty::{detect_default_shell, PtyConfig};
+use agemax_term::pty::{resolve_shell_program, PtyConfig};
 use agemax_term::surface::TerminalSurface;
 use agemax_term::vt::GridPoint;
 use chrome_ui::{
     render_pane_header, render_top_toolbar, NewWorkspaceModal, PaneHeaderAction, PaneHeaderProps,
-    RenameModal, RenameTarget, ToolbarAction, ViewSettingsModal,
+    RenameModal, RenameTarget, ToolbarAction,
 };
 use command_palette::{CommandPalette, PaletteAction};
 use eframe::egui::{self, Color32, FontId, Key, Pos2, Rect, Stroke, StrokeKind, Vec2};
@@ -40,6 +41,10 @@ use mouse_ux::{
     SessionRestoreAction, TextSelection,
 };
 use notification_win::{NotificationService, PlatformNotificationService};
+use onboarding_settings::{
+    render_onboarding_banner, AgentLaunchRequest, AgentLauncherModal, OnboardingAction,
+    PreflightState, SettingsModal,
+};
 use sidebar::{render_sidebar, SidebarAction, SidebarProps, SidebarWorkspaceMeta};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -113,7 +118,9 @@ pub struct AgeMaxApp {
     command_palette: CommandPalette,
     new_workspace_modal: NewWorkspaceModal,
     rename_modal: RenameModal,
-    view_settings_modal: ViewSettingsModal,
+    settings_modal: SettingsModal,
+    agent_launcher_modal: AgentLauncherModal,
+    preflight: PreflightState,
     pending_restore: Option<SessionSnapshot>,
     text_selection: Option<TextSelection>,
     active_split_drag: Option<ActiveSplitDrag>,
@@ -141,11 +148,19 @@ impl AgeMaxApp {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let git_branch = detect_git_branch(&cwd);
 
+        let mut config = AgeMaxConfig::load_or_create_default();
+        config.merge_workspace_config(&cwd);
+
         let mut initial_workspace = Workspace::new("Main Workspace", cwd.clone(), initial_pane);
         initial_workspace.git_branch = git_branch;
 
-        let initial_surface = spawn_terminal_surface(TerminalSize::new(80, 24), &cwd)
-            .expect("Failed to initialize initial ConPTY surface");
+        let initial_surface = spawn_terminal_surface(
+            TerminalSize::new(80, 24),
+            &cwd,
+            config.general.default_shell.as_deref(),
+            HashMap::new(),
+        )
+        .expect("Failed to initialize initial ConPTY surface");
 
         let mut surfaces = HashMap::new();
         surfaces.insert(initial_pane, initial_surface);
@@ -157,12 +172,16 @@ impl AgeMaxApp {
         pane_status.insert(initial_pane, AgentStatus::Idle);
 
         let (ipc_tx, ipc_rx) = crossbeam_channel::unbounded();
+        let mut preflight = PreflightState::new();
         if let Some(ctx_container) = cc {
             start_ipc_server(ipc_tx, ctx_container.egui_ctx.clone());
+            preflight.trigger_check(
+                config.general.default_shell.clone(),
+                Some(ctx_container.egui_ctx.clone()),
+            );
+        } else {
+            preflight.trigger_check(config.general.default_shell.clone(), None);
         }
-
-        let mut config = AgeMaxConfig::load_or_create_default();
-        config.merge_workspace_config(&cwd);
 
         let config_watcher = ConfigWatcher::watch(AgeMaxConfig::default_path()).ok();
         let mut command_palette = CommandPalette::new();
@@ -189,7 +208,9 @@ impl AgeMaxApp {
             command_palette,
             new_workspace_modal: NewWorkspaceModal::new(),
             rename_modal: RenameModal::default(),
-            view_settings_modal: ViewSettingsModal::default(),
+            settings_modal: SettingsModal::default(),
+            agent_launcher_modal: AgentLauncherModal::new(),
+            preflight,
             pending_restore,
             text_selection: None,
             active_split_drag: None,
@@ -209,7 +230,33 @@ impl AgeMaxApp {
         self.command_palette.is_open
             || self.new_workspace_modal.is_open
             || self.rename_modal.is_open
-            || self.view_settings_modal.is_open
+            || self.settings_modal.is_open
+            || self.agent_launcher_modal.is_open
+    }
+
+    fn dispatch_attention_alerts(&self, ws_id: WorkspaceId) {
+        if self.config.general.enable_toast_notifications {
+            if let Some(item) = self.notification_store.latest_unread_for_workspace(ws_id) {
+                self.notification_service.show_notification(item);
+            }
+        }
+        if self.config.general.enable_taskbar_flash {
+            self.notification_service.flash_window();
+        }
+    }
+
+    fn spawn_default_surface(
+        &self,
+        size: TerminalSize,
+        cwd: &Path,
+        extra_env: HashMap<String, String>,
+    ) -> Result<TerminalSurface, agemax_term::PtyError> {
+        spawn_terminal_surface(
+            size,
+            cwd,
+            self.config.general.default_shell.as_deref(),
+            extra_env,
+        )
     }
 
     fn copy_selection_to_clipboard(
@@ -261,7 +308,7 @@ impl AgeMaxApp {
             .map(|s| TerminalSize::new(s.cols() as u16, s.rows() as u16))
             .unwrap_or_else(|| TerminalSize::new(80, 24));
 
-        if let Ok(fresh) = spawn_terminal_surface(size, &cwd) {
+        if let Ok(fresh) = self.spawn_default_surface(size, &cwd, HashMap::new()) {
             self.surfaces.insert(pane_id, fresh);
             self.osc_parsers.insert(pane_id, OscParser::new());
             self.pane_status.insert(pane_id, AgentStatus::Idle);
@@ -269,6 +316,70 @@ impl AgeMaxApp {
         } else {
             false
         }
+    }
+
+    fn launch_agent_request(&mut self, req: AgentLaunchRequest) {
+        let pane_id = req.target_pane;
+        self.focus_pane_in_active_tab(pane_id);
+
+        let cwd = self
+            .find_workspace_for_pane(pane_id)
+            .and_then(|ws_id| self.workspaces.iter().find(|w| w.id == ws_id))
+            .map(|w| w.cwd.clone())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+        if let Some(ws_id) = self.find_workspace_for_pane(pane_id) {
+            if let Some(ws) = self.workspaces.iter_mut().find(|w| w.id == ws_id) {
+                ws.profile_label = if req.profile.isolate_storage {
+                    Some(req.profile.name.clone())
+                } else {
+                    None
+                };
+            }
+        }
+
+        let adapter = AntigravityAdapter::new();
+        if adapter.detect_binary().is_none() {
+            if let Some(ws_id) = self.find_workspace_for_pane(pane_id) {
+                self.notification_store.notify(
+                    ws_id,
+                    pane_id,
+                    AgentStatus::Failed,
+                    "agy.exe not found. Click 'Copy Install Command' in the top guide.",
+                );
+                self.show_notifications_panel = true;
+            }
+            return;
+        }
+
+        let is_exited = self
+            .surfaces
+            .get(&pane_id)
+            .map(|s| s.has_exited())
+            .unwrap_or(true);
+        if req.profile.isolate_storage || is_exited {
+            let env = adapter
+                .build_preset_command(req.preset.clone(), &req.profile, &cwd)
+                .map(|c| c.env)
+                .unwrap_or_default();
+            let size = self
+                .surfaces
+                .get(&pane_id)
+                .map(|s| TerminalSize::new(s.cols() as u16, s.rows() as u16))
+                .unwrap_or_else(|| TerminalSize::new(80, 24));
+            if let Ok(fresh) = self.spawn_default_surface(size, &cwd, env) {
+                self.surfaces.insert(pane_id, fresh);
+                self.osc_parsers.insert(pane_id, OscParser::new());
+                self.pane_status.insert(pane_id, AgentStatus::Idle);
+            }
+        }
+
+        let line = AntigravityAdapter::shell_line_for_preset(&req.preset);
+        if let Some(surface) = self.surfaces.get_mut(&pane_id) {
+            let cmd = format!("{}\r", line);
+            let _ = surface.send_input(cmd.as_bytes());
+        }
+        self.save_session();
     }
 
     fn resume_agent_in_pane(&mut self, pane_id: PaneId) {
@@ -318,7 +429,11 @@ impl AgeMaxApp {
                     let pid = PaneId::new();
                     layout = LayoutTree::new_leaf(pid);
                     active_pane = pid;
-                    if let Ok(surf) = spawn_terminal_surface(TerminalSize::new(80, 24), &ws_dir) {
+                    if let Ok(surf) = self.spawn_default_surface(
+                        TerminalSize::new(80, 24),
+                        &ws_dir,
+                        HashMap::new(),
+                    ) {
                         new_surfaces.insert(pid, surf);
                         new_parsers.insert(pid, OscParser::new());
                         new_statuses.insert(pid, AgentStatus::Idle);
@@ -330,8 +445,11 @@ impl AgeMaxApp {
                             .map(|p| p.cwd.clone())
                             .filter(|d| d.exists())
                             .unwrap_or_else(|| ws_dir.clone());
-                        if let Ok(surf) = spawn_terminal_surface(TerminalSize::new(80, 24), &p_dir)
-                        {
+                        if let Ok(surf) = self.spawn_default_surface(
+                            TerminalSize::new(80, 24),
+                            &p_dir,
+                            HashMap::new(),
+                        ) {
                             new_surfaces.insert(*pid, surf);
                             new_parsers.insert(*pid, OscParser::new());
                             new_statuses.insert(*pid, AgentStatus::Idle);
@@ -362,7 +480,9 @@ impl AgeMaxApp {
             if tabs.is_empty() {
                 let pid = PaneId::new();
                 tabs.push(Tab::new("Terminal 1", pid));
-                if let Ok(surf) = spawn_terminal_surface(TerminalSize::new(80, 24), &ws_dir) {
+                if let Ok(surf) =
+                    self.spawn_default_surface(TerminalSize::new(80, 24), &ws_dir, HashMap::new())
+                {
                     new_surfaces.insert(pid, surf);
                     new_parsers.insert(pid, OscParser::new());
                     new_statuses.insert(pid, AgentStatus::Idle);
@@ -422,7 +542,9 @@ impl AgeMaxApp {
         let mut ws = Workspace::new(name, cwd.clone(), pane_id);
         ws.git_branch = detect_git_branch(&cwd);
 
-        let surface = spawn_terminal_surface(TerminalSize::new(80, 24), &cwd).ok()?;
+        let surface = self
+            .spawn_default_surface(TerminalSize::new(80, 24), &cwd, HashMap::new())
+            .ok()?;
         let ws_id = ws.id;
 
         self.surfaces.insert(pane_id, surface);
@@ -468,7 +590,9 @@ impl AgeMaxApp {
             None => return,
         };
         let new_pane = PaneId::new();
-        if let Ok(surface) = spawn_terminal_surface(TerminalSize::new(80, 24), &cwd) {
+        if let Ok(surface) =
+            self.spawn_default_surface(TerminalSize::new(80, 24), &cwd, HashMap::new())
+        {
             self.surfaces.insert(new_pane, surface);
             self.osc_parsers.insert(new_pane, OscParser::new());
             self.pane_status.insert(new_pane, AgentStatus::Idle);
@@ -651,7 +775,7 @@ impl AgeMaxApp {
             PaletteAction::NewWorkspace => self.open_new_workspace_modal(),
             PaletteAction::LaunchAgy => {
                 if let Some(pane_id) = self.active_pane_id() {
-                    self.launch_agy_in_pane(pane_id);
+                    self.agent_launcher_modal.open(pane_id);
                 }
             }
             PaletteAction::ToggleUiMode => {
@@ -662,7 +786,7 @@ impl AgeMaxApp {
                 self.switch_ui_mode(next);
             }
             PaletteAction::OpenViewSettings => {
-                self.view_settings_modal.is_open = true;
+                self.settings_modal.open(&self.config);
             }
             PaletteAction::Custom(cmd) => {
                 let target = self.active_pane_id();
@@ -686,7 +810,9 @@ impl AgeMaxApp {
         };
 
         let new_pane_id = PaneId::new();
-        if let Ok(surface) = spawn_terminal_surface(TerminalSize::new(80, 24), &cwd) {
+        if let Ok(surface) =
+            self.spawn_default_surface(TerminalSize::new(80, 24), &cwd, HashMap::new())
+        {
             self.surfaces.insert(new_pane_id, surface);
             self.osc_parsers.insert(new_pane_id, OscParser::new());
             self.pane_status.insert(new_pane_id, AgentStatus::Idle);
@@ -877,13 +1003,7 @@ impl AgeMaxApp {
 
                 self.notification_store
                     .notify(active_ws_id, target_pane, st, &full_msg);
-                if let Some(item) = self
-                    .notification_store
-                    .latest_unread_for_workspace(active_ws_id)
-                {
-                    self.notification_service.show_notification(item);
-                }
-                self.notification_service.flash_window();
+                self.dispatch_attention_alerts(active_ws_id);
                 let _ = reply.send(serde_json::json!({ "status": "notified" }));
             }
             IpcAppCommand::StatusSet {
@@ -1179,12 +1299,14 @@ impl AgeMaxApp {
 fn spawn_terminal_surface(
     size: TerminalSize,
     cwd: &Path,
+    shell_pref: Option<&str>,
+    env: HashMap<String, String>,
 ) -> Result<TerminalSurface, agemax_term::PtyError> {
-    let shell = detect_default_shell();
+    let shell = resolve_shell_program(shell_pref);
     let config = PtyConfig {
         program: shell,
         args: Vec::new(),
-        env: HashMap::new(),
+        env,
         cwd: Some(cwd.to_path_buf()),
         cols: size.cols,
         rows: size.rows,
@@ -1202,6 +1324,8 @@ impl eframe::App for AgeMaxApp {
             );
             self.first_frame_rendered = true;
         }
+
+        self.preflight.poll();
 
         // 1. Check for configuration hot reload
         if let Some(watcher) = &self.config_watcher {
@@ -1244,12 +1368,7 @@ impl eframe::App for AgeMaxApp {
                                 let msg =
                                     message.unwrap_or_else(|| status.display_name().to_string());
                                 self.notification_store.notify(ws_id, pane_id, status, &msg);
-                                if let Some(item) =
-                                    self.notification_store.latest_unread_for_workspace(ws_id)
-                                {
-                                    self.notification_service.show_notification(item);
-                                }
-                                self.notification_service.flash_window();
+                                self.dispatch_attention_alerts(ws_id);
                             }
                         }
                     }
@@ -1262,12 +1381,7 @@ impl eframe::App for AgeMaxApp {
                                 AgentStatus::WaitingForInput,
                                 &formatted,
                             );
-                            if let Some(item) =
-                                self.notification_store.latest_unread_for_workspace(ws_id)
-                            {
-                                self.notification_service.show_notification(item);
-                            }
-                            self.notification_service.flash_window();
+                            self.dispatch_attention_alerts(ws_id);
                         }
                     }
                     AgentOscEvent::Bell => {
@@ -1278,12 +1392,7 @@ impl eframe::App for AgeMaxApp {
                                 AgentStatus::WaitingForInput,
                                 "Terminal Bell",
                             );
-                            if let Some(item) =
-                                self.notification_store.latest_unread_for_workspace(ws_id)
-                            {
-                                self.notification_service.show_notification(item);
-                            }
-                            self.notification_service.flash_window();
+                            self.dispatch_attention_alerts(ws_id);
                         }
                     }
                 }
@@ -1365,7 +1474,7 @@ impl eframe::App for AgeMaxApp {
                             self.is_sidebar_collapsed = !self.is_sidebar_collapsed;
                         }
                         SidebarAction::OpenViewSettings => {
-                            self.view_settings_modal.is_open = true;
+                            self.settings_modal.open(&self.config);
                         }
                     }
                 }
@@ -1397,7 +1506,7 @@ impl eframe::App for AgeMaxApp {
                             }
                             ToolbarAction::LaunchAgy => {
                                 if let Some(pane_id) = self.active_pane_id() {
-                                    self.launch_agy_in_pane(pane_id);
+                                    self.agent_launcher_modal.open(pane_id);
                                 }
                             }
                             ToolbarAction::OpenCommandPalette => self.command_palette.open(),
@@ -1405,7 +1514,7 @@ impl eframe::App for AgeMaxApp {
                                 self.show_notifications_panel = !self.show_notifications_panel;
                             }
                             ToolbarAction::OpenViewSettings => {
-                                self.view_settings_modal.is_open = true;
+                                self.settings_modal.open(&self.config);
                             }
                             ToolbarAction::SwitchUiMode(mode) => self.switch_ui_mode(mode),
                         }
@@ -1457,6 +1566,27 @@ impl eframe::App for AgeMaxApp {
                                         self.save_session();
                                     }
                                 }
+                            }
+                        }
+                    }
+
+                    // Optional first-run agy.exe onboarding setup banner (REQ-075)
+                    if let Some(onb) =
+                        render_onboarding_banner(ui, &mut self.preflight, &self.config)
+                    {
+                        match onb {
+                            OnboardingAction::Recheck => {
+                                self.preflight.trigger_check(
+                                    self.config.general.default_shell.clone(),
+                                    Some(ui.ctx().clone()),
+                                );
+                            }
+                            OnboardingAction::HideForever => {
+                                self.config.general.enable_onboarding_banner = false;
+                                let _ = self.config.save_default();
+                            }
+                            OnboardingAction::Dismiss => {
+                                self.preflight.session_dismissed = true;
                             }
                         }
                     }
@@ -2070,7 +2200,9 @@ impl eframe::App for AgeMaxApp {
 
                     if let Some(pane_action) = pending_pane_action {
                         match pane_action {
-                            PaneHeaderAction::LaunchAgy(pid) => self.launch_agy_in_pane(pid),
+                            PaneHeaderAction::LaunchAgy(pid) => {
+                                self.agent_launcher_modal.open(pid);
+                            }
                             PaneHeaderAction::SplitRight(pid) => {
                                 self.focus_pane_in_active_tab(pid);
                                 self.split_active_pane(SplitDirection::Horizontal);
@@ -2205,10 +2337,24 @@ impl eframe::App for AgeMaxApp {
                     }
                 }
 
-                // 7. Interactive View Mode, Theme & Font Settings Modal
-                if self.view_settings_modal.show(ui.ctx(), &mut self.config) {
+                // 7. Comprehensive Visual Settings Modal (Appearance / Terminal & Alerts / Shortcuts / Quick Actions)
+                if self
+                    .settings_modal
+                    .show(ui.ctx(), &mut self.config, &mut self.preflight)
+                {
                     self.font_size = self.config.general.font_size.clamp(9.0, 32.0);
+                    self.command_palette.sync_builtins(&self.config.keybindings);
+                    self.command_palette
+                        .set_custom_commands(&self.config.commands);
                     let _ = self.config.save_default();
+                }
+
+                // 7b. Plain-English Visual Agent Preset Launcher (REQ-076)
+                if let Some(req) = self
+                    .agent_launcher_modal
+                    .show(ui.ctx(), &mut self.preflight)
+                {
+                    self.launch_agent_request(req);
                 }
 
                 // 8. Right-Click Context Menu overlay (Copy / Paste / Clear / Split)
@@ -2242,7 +2388,7 @@ impl eframe::App for AgeMaxApp {
                             self.focus_pane_in_active_tab(pid);
                             self.split_active_pane(SplitDirection::Vertical);
                         }
-                        ContextMenuAction::LaunchAgy(pid) => self.launch_agy_in_pane(pid),
+                        ContextMenuAction::LaunchAgy(pid) => self.agent_launcher_modal.open(pid),
                     }
                 }
             });
