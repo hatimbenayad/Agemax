@@ -1318,7 +1318,10 @@ pub fn render_workspace_folder_bar(
         .inner_margin(Vec2::new(10.0, 5.0));
 
     let resp = frame.show(ui, |ui| {
-        ui.set_min_height(metrics::PATH_BAR_HEIGHT - 10.0);
+        ui.set_min_size(Vec2::new(
+            ui.available_width(),
+            metrics::PATH_BAR_HEIGHT - 10.0,
+        ));
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
 
