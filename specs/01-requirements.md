@@ -146,3 +146,8 @@ This document specifies the testable requirements for **Age Max**. Every require
 ### Unit 11: Windows Packaging & Single-Instance Activation
 - **REQ-078**: Release builds MUST embed an application icon (`.ico`), offer a Windows installer / portable release package, and support optional Explorer "Open Folder in Age Max" integration.
 - **REQ-079**: Launching `agemax-app.exe` when an instance already owns `\\.\pipe\agemax-<username>` MUST forward focus/directory arguments to the running window over IPC instead of failing or colliding on the named pipe.
+
+### Unit 12: Workspace Folder Lock, Path Visibility & Agent Sandbox
+- **REQ-080**: The UI MUST clearly display the active workspace's full working folder path and lock status so users always see where terminals and agents operate.
+- **REQ-081**: `GeneralConfig` MUST support an optional `default_workspace_dir` and `allowed_root_dir` in `config.toml`; when `allowed_root_dir` is set, Age Max MUST reject workspace creation, Explorer launches, session restores, and IPC requests targeting directories outside `allowed_root_dir` (normalizing `..` traversal and symlinks/canonical paths).
+- **REQ-082**: `GeneralConfig` and Agent Launcher MUST provide a toggleable `enforce_agy_sandbox` option passing `--sandbox` when launching `agy`.

@@ -1,14 +1,16 @@
 use crate::chrome_ui::{centered_modal_pos, modal_frame};
+use crate::folder_picker::spawn_folder_picker_async;
 use agemax_agy::adapter::{AgentAdapter, AgentLaunchPreset, AntigravityAdapter};
 use agemax_agy::profile::{ProfileConfig, ProfileManager};
 use agemax_config::keybindings::KeybindingsConfig;
+use agemax_config::safety::display_clean_path;
 use agemax_config::schema::{AgeMaxConfig, CustomCommand, UiMode};
 use agemax_config::theme::{ThemeConfig, ThemePreset};
 use agemax_core::layout::PaneId;
 use agemax_term::pty::{available_shells, resolve_shell_program};
 use crossbeam_channel::Receiver;
 use eframe::egui::{self, Color32, Key, Stroke, Vec2};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const OFFICIAL_AGY_INSTALL_CMD: &str = "irm https://antigravity.google/cli/install.ps1 | iex";
 
@@ -142,6 +144,7 @@ pub struct AgentLaunchRequest {
     pub target_pane: PaneId,
     pub preset: AgentLaunchPreset,
     pub profile: ProfileConfig,
+    pub sandbox: bool,
 }
 
 /// Plain-English visual launcher modal for starting `agy` without memorizing flags (`REQ-076`).
@@ -151,6 +154,7 @@ pub struct AgentLauncherModal {
     pub target_pane: Option<PaneId>,
     profiles: Vec<ProfileConfig>,
     selected_profile_idx: usize,
+    sandbox_mode: bool,
     creating_profile: bool,
     new_profile_name: String,
     new_profile_shared_history: bool,
@@ -170,6 +174,7 @@ impl AgentLauncherModal {
             target_pane: None,
             profiles: vec![ProfileConfig::default_mode_a()],
             selected_profile_idx: 0,
+            sandbox_mode: false,
             creating_profile: false,
             new_profile_name: String::new(),
             new_profile_shared_history: true,
@@ -177,13 +182,14 @@ impl AgentLauncherModal {
         }
     }
 
-    pub fn open(&mut self, target_pane: PaneId) {
+    pub fn open(&mut self, target_pane: PaneId, default_sandbox: bool) {
         self.is_open = true;
         self.target_pane = Some(target_pane);
         self.profiles = ProfileManager::new().list_profiles();
         if self.selected_profile_idx >= self.profiles.len() {
             self.selected_profile_idx = 0;
         }
+        self.sandbox_mode = default_sandbox;
         self.creating_profile = false;
         self.new_profile_name.clear();
         self.profile_error = None;
@@ -199,6 +205,8 @@ impl AgentLauncherModal {
         &mut self,
         ctx: &egui::Context,
         preflight: &mut PreflightState,
+        workspace_cwd: &Path,
+        allowed_root: Option<&Path>,
     ) -> Option<AgentLaunchRequest> {
         if !self.is_open {
             return None;
@@ -211,11 +219,11 @@ impl AgentLauncherModal {
         let target_pane = self.target_pane?;
         let mut launch_req = None;
         let mut should_close = false;
-        let pos = centered_modal_pos(ctx, 500.0, 390.0);
+        let pos = centered_modal_pos(ctx, 510.0, 445.0);
 
         egui::Window::new("agent_launcher_modal")
             .fixed_pos(pos)
-            .fixed_size(Vec2::new(500.0, 380.0))
+            .fixed_size(Vec2::new(510.0, 435.0))
             .title_bar(false)
             .resizable(false)
             .collapsible(false)
@@ -240,6 +248,29 @@ impl AgentLauncherModal {
                         egui::RichText::new("Choose how you want to start the AI agent—no flags to memorize.")
                             .size(11.5)
                             .color(Color32::from_rgb(160, 170, 190)),
+                    );
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "📁 Working in: {}",
+                                display_clean_path(workspace_cwd)
+                            ))
+                            .size(11.5)
+                            .color(Color32::from_rgb(135, 210, 250))
+                            .strong(),
+                        );
+                        if allowed_root.is_some() {
+                            ui.label(
+                                egui::RichText::new("• 🔒 Safe Folder Locked")
+                                    .size(11.0)
+                                    .color(Color32::from_rgb(125, 225, 165)),
+                            );
+                        }
+                    });
+                    ui.checkbox(
+                        &mut self.sandbox_mode,
+                        "🛡 Run with agy --sandbox (enable CLI sandbox restrictions)",
                     );
 
                     let missing_agy = preflight
@@ -412,6 +443,7 @@ impl AgentLauncherModal {
                                                 target_pane,
                                                 preset: preset.clone(),
                                                 profile: active_profile.clone(),
+                                                sandbox: self.sandbox_mode,
                                             });
                                             should_close = true;
                                         }
@@ -435,18 +467,24 @@ impl AgentLauncherModal {
 pub enum SettingsTab {
     #[default]
     Appearance,
+    Safety,
     TerminalAlerts,
     Shortcuts,
     QuickActions,
 }
 
-/// Comprehensive 4-tab visual Settings Modal backed cleanly by `config.toml` (`REQ-077`).
+/// Comprehensive 5-tab visual Settings Modal backed cleanly by `config.toml` (`REQ-077`, `REQ-081`).
 #[derive(Debug, Default)]
 pub struct SettingsModal {
     pub is_open: bool,
     active_tab: SettingsTab,
     draft_keybindings: KeybindingsConfig,
     keybinding_status: Option<Result<(), String>>,
+    draft_default_dir: String,
+    draft_allowed_root: String,
+    safety_status: Option<Result<String, String>>,
+    default_dir_picker_rx: Option<Receiver<Option<PathBuf>>>,
+    allowed_root_picker_rx: Option<Receiver<Option<PathBuf>>>,
     new_cmd_name: String,
     new_cmd_line: String,
     new_cmd_desc: String,
@@ -454,14 +492,37 @@ pub struct SettingsModal {
 
 impl SettingsModal {
     pub fn open(&mut self, config: &AgeMaxConfig) {
+        self.open_tab(config, self.active_tab);
+    }
+
+    pub fn open_tab(&mut self, config: &AgeMaxConfig, tab: SettingsTab) {
         self.is_open = true;
+        self.active_tab = tab;
         self.draft_keybindings = config.keybindings.clone();
         self.keybinding_status = None;
+        self.draft_default_dir = config
+            .general
+            .default_workspace_dir
+            .as_deref()
+            .map(display_clean_path)
+            .unwrap_or_default();
+        self.draft_allowed_root = config
+            .general
+            .allowed_root_dir
+            .as_deref()
+            .map(display_clean_path)
+            .unwrap_or_default();
+        self.safety_status = None;
+        self.default_dir_picker_rx = None;
+        self.allowed_root_picker_rx = None;
     }
 
     pub fn close(&mut self) {
         self.is_open = false;
         self.keybinding_status = None;
+        self.safety_status = None;
+        self.default_dir_picker_rx = None;
+        self.allowed_root_picker_rx = None;
     }
 
     /// Show Settings UI. Returns `true` when `config` changed and should be saved/applied.
@@ -481,11 +542,11 @@ impl SettingsModal {
 
         let mut changed = false;
         let mut should_close = false;
-        let pos = centered_modal_pos(ctx, 560.0, 500.0);
+        let pos = centered_modal_pos(ctx, 600.0, 515.0);
 
         egui::Window::new("settings_modal")
             .fixed_pos(pos)
-            .fixed_size(Vec2::new(560.0, 490.0))
+            .fixed_size(Vec2::new(600.0, 505.0))
             .title_bar(false)
             .resizable(false)
             .collapsible(false)
@@ -507,9 +568,10 @@ impl SettingsModal {
                     });
 
                     ui.add_space(6.0);
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         for (tab, label) in [
-                            (SettingsTab::Appearance, "Appearance & View"),
+                            (SettingsTab::Appearance, "Appearance"),
+                            (SettingsTab::Safety, "🛡 Safety & Folders"),
                             (SettingsTab::TerminalAlerts, "Terminal & Alerts"),
                             (SettingsTab::Shortcuts, "Shortcuts"),
                             (SettingsTab::QuickActions, "Quick Actions"),
@@ -523,10 +585,24 @@ impl SettingsModal {
                     ui.add_space(6.0);
 
                     egui::ScrollArea::vertical()
-                        .max_height(385.0)
+                        .max_height(395.0)
                         .show(ui, |ui| match self.active_tab {
                             SettingsTab::Appearance => {
                                 if render_appearance_tab(ui, config) {
+                                    changed = true;
+                                }
+                            }
+                            SettingsTab::Safety => {
+                                if render_safety_tab(
+                                    ui,
+                                    ctx,
+                                    config,
+                                    &mut self.draft_default_dir,
+                                    &mut self.draft_allowed_root,
+                                    &mut self.safety_status,
+                                    &mut self.default_dir_picker_rx,
+                                    &mut self.allowed_root_picker_rx,
+                                ) {
                                     changed = true;
                                 }
                             }
@@ -565,6 +641,212 @@ impl SettingsModal {
         }
         changed
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_safety_tab(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    config: &mut AgeMaxConfig,
+    draft_default_dir: &mut String,
+    draft_allowed_root: &mut String,
+    safety_status: &mut Option<Result<String, String>>,
+    default_picker_rx: &mut Option<Receiver<Option<PathBuf>>>,
+    allowed_picker_rx: &mut Option<Receiver<Option<PathBuf>>>,
+) -> bool {
+    let mut changed = false;
+
+    if let Some(rx) = default_picker_rx.as_ref() {
+        if let Ok(picked) = rx.try_recv() {
+            if let Some(p) = picked {
+                *draft_default_dir = display_clean_path(&p);
+                config.general.default_workspace_dir = Some(p);
+                *safety_status = Some(Ok("Updated default starting folder.".to_string()));
+                changed = true;
+            }
+            *default_picker_rx = None;
+        }
+    }
+    if let Some(rx) = allowed_picker_rx.as_ref() {
+        if let Ok(picked) = rx.try_recv() {
+            if let Some(p) = picked {
+                let clean = display_clean_path(&p);
+                *draft_allowed_root = clean.clone();
+                config.general.allowed_root_dir = Some(p);
+                *safety_status = Some(Ok(format!("Folder lock active: restricted to {clean}")));
+                changed = true;
+            }
+            *allowed_picker_rx = None;
+        }
+    }
+
+    ui.label(
+        egui::RichText::new("Restrict Workspaces to a Safe Folder")
+            .size(13.0)
+            .color(Color32::WHITE)
+            .strong(),
+    );
+    ui.label(
+        egui::RichText::new(
+            "When set, Age Max blocks opening local workspaces, Explorer launches, session restores, and CLI/IPC commands outside this folder tree.",
+        )
+        .size(11.0)
+        .color(Color32::from_rgb(165, 175, 195)),
+    );
+    ui.add_space(4.0);
+    if let Some(root) = &config.general.allowed_root_dir {
+        ui.label(
+            egui::RichText::new(format!("🔒 Active Lock: {}", display_clean_path(root)))
+                .size(11.5)
+                .color(Color32::from_rgb(125, 225, 165))
+                .strong(),
+        );
+    } else {
+        ui.label(
+            egui::RichText::new("🔓 Currently unrestricted — workspaces can open in any folder.")
+                .size(11.5)
+                .color(Color32::from_rgb(245, 190, 95)),
+        );
+    }
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(draft_allowed_root)
+                .desired_width(310.0)
+                .hint_text("e.g. C:\\Users\\...\\SafeProjects")
+                .text_color(Color32::WHITE),
+        );
+        if ui
+            .add_enabled(allowed_picker_rx.is_none(), egui::Button::new("Browse…"))
+            .clicked()
+        {
+            let initial = (!draft_allowed_root.trim().is_empty())
+                .then(|| PathBuf::from(draft_allowed_root.trim()));
+            *allowed_picker_rx = Some(spawn_folder_picker_async(initial, ctx.clone()));
+        }
+        if ui.button("Apply Lock").clicked() {
+            let trimmed = draft_allowed_root.trim();
+            if trimmed.is_empty() {
+                config.general.allowed_root_dir = None;
+                *safety_status = Some(Ok("Cleared folder restriction.".to_string()));
+                changed = true;
+            } else {
+                let path = PathBuf::from(trimmed);
+                if path.is_dir() {
+                    config.general.allowed_root_dir = Some(path);
+                    *safety_status = Some(Ok(format!("Folder lock active: {trimmed}")));
+                    changed = true;
+                } else {
+                    *safety_status = Some(Err(format!("Folder does not exist: {trimmed}")));
+                }
+            }
+        }
+        if config.general.allowed_root_dir.is_some() && ui.button("Unlock").clicked() {
+            config.general.allowed_root_dir = None;
+            draft_allowed_root.clear();
+            *safety_status = Some(Ok("Folder lock removed.".to_string()));
+            changed = true;
+        }
+    });
+
+    ui.add_space(12.0);
+    ui.label(
+        egui::RichText::new("Default Starting Folder")
+            .size(13.0)
+            .color(Color32::WHITE)
+            .strong(),
+    );
+    ui.label(
+        egui::RichText::new(
+            "Age Max will always open here when launched without a folder argument.",
+        )
+        .size(11.0)
+        .color(Color32::from_rgb(165, 175, 195)),
+    );
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(draft_default_dir)
+                .desired_width(310.0)
+                .hint_text("Uses current folder if unset")
+                .text_color(Color32::WHITE),
+        );
+        if ui
+            .add_enabled(default_picker_rx.is_none(), egui::Button::new("Browse…"))
+            .clicked()
+        {
+            let initial = (!draft_default_dir.trim().is_empty())
+                .then(|| PathBuf::from(draft_default_dir.trim()));
+            *default_picker_rx = Some(spawn_folder_picker_async(initial, ctx.clone()));
+        }
+        if ui.button("Set Start").clicked() {
+            let trimmed = draft_default_dir.trim();
+            if trimmed.is_empty() {
+                config.general.default_workspace_dir = None;
+                *safety_status = Some(Ok("Cleared default starting folder.".to_string()));
+                changed = true;
+            } else {
+                let path = PathBuf::from(trimmed);
+                if path.is_dir() {
+                    config.general.default_workspace_dir = Some(path);
+                    *safety_status = Some(Ok(format!("Default start folder set to {trimmed}")));
+                    changed = true;
+                } else {
+                    *safety_status = Some(Err(format!("Folder does not exist: {trimmed}")));
+                }
+            }
+        }
+        if config.general.default_workspace_dir.is_some() && ui.button("Clear").clicked() {
+            config.general.default_workspace_dir = None;
+            draft_default_dir.clear();
+            *safety_status = Some(Ok("Cleared default starting folder.".to_string()));
+            changed = true;
+        }
+    });
+
+    ui.add_space(12.0);
+    ui.label(
+        egui::RichText::new("Antigravity Agent Sandbox")
+            .size(13.0)
+            .color(Color32::WHITE)
+            .strong(),
+    );
+    if ui
+        .checkbox(
+            &mut config.general.enforce_agy_sandbox,
+            "Always run agy with --sandbox restrictions when launched from Age Max",
+        )
+        .changed()
+    {
+        changed = true;
+    }
+    ui.label(
+        egui::RichText::new("Note: Safe Folder Lock restricts where Age Max opens workspaces and agents; raw shells (PowerShell / WSL / SSH) still run with normal user permissions unless agy --sandbox restricts agent actions.")
+            .size(10.5)
+            .color(Color32::from_rgb(145, 155, 175)),
+    );
+
+    if let Some(status) = safety_status {
+        ui.add_space(6.0);
+        match status {
+            Ok(msg) => {
+                ui.label(
+                    egui::RichText::new(msg.as_str())
+                        .size(11.5)
+                        .color(Color32::from_rgb(110, 215, 145)),
+                );
+            }
+            Err(err) => {
+                ui.label(
+                    egui::RichText::new(err.as_str())
+                        .size(11.5)
+                        .color(Color32::from_rgb(240, 100, 100)),
+                );
+            }
+        }
+    }
+
+    changed
 }
 
 fn render_appearance_tab(ui: &mut egui::Ui, config: &mut AgeMaxConfig) -> bool {

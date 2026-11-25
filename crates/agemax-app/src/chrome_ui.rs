@@ -1,5 +1,6 @@
 use crate::folder_picker::spawn_folder_picker_async;
 pub use agemax_config::keybindings::KeybindingsConfig;
+use agemax_config::safety::{display_clean_path, validate_workspace_path};
 use agemax_config::schema::{AgeMaxConfig, UiMode};
 use agemax_core::layout::PaneId;
 use agemax_core::status::AgentStatus;
@@ -7,7 +8,7 @@ use agemax_core::workspace::WorkspaceBackend;
 use agemax_term::detect_wsl_distros;
 use crossbeam_channel::Receiver;
 use eframe::egui::{self, Color32, Key, Pos2, Rect, Stroke, Vec2};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Actions emitted by the Guided mode Top Utility Toolbar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +25,7 @@ pub enum ToolbarAction {
     OpenCommandPalette,
     ToggleNotifications,
     OpenViewSettings,
+    OpenSafetySettings,
     SwitchUiMode(UiMode),
 }
 
@@ -103,11 +105,14 @@ impl NewWorkspaceModal {
         }
     }
 
-    pub fn open(&mut self, default_dir: &std::path::Path, default_index: usize) {
+    pub fn open(&mut self, default_dir: &Path, default_index: usize, allowed_root: Option<&Path>) {
         self.is_open = true;
         self.backend_tab = BackendTab::Local;
-        self.path_input = default_dir.to_string_lossy().to_string();
-        self.name = default_dir
+        let initial_dir = allowed_root
+            .filter(|root| validate_workspace_path(default_dir, Some(root)).is_err())
+            .unwrap_or(default_dir);
+        self.path_input = display_clean_path(initial_dir);
+        self.name = initial_dir
             .file_name()
             .and_then(|n| n.to_str())
             .filter(|s| !s.trim().is_empty())
@@ -150,7 +155,11 @@ impl NewWorkspaceModal {
     }
 
     /// Render the New Workspace modal. Returns `Some(NewWorkspaceRequest)` upon submission.
-    pub fn show(&mut self, ctx: &egui::Context) -> Option<NewWorkspaceRequest> {
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        allowed_root: Option<&Path>,
+    ) -> Option<NewWorkspaceRequest> {
         if !self.is_open {
             return None;
         }
@@ -164,10 +173,11 @@ impl NewWorkspaceModal {
             return None;
         }
 
+        let extra_h = if allowed_root.is_some() { 26.0 } else { 0.0 };
         let modal_h = match self.backend_tab {
-            BackendTab::Local => 255.0,
-            BackendTab::Wsl => 295.0,
-            BackendTab::Ssh => 315.0,
+            BackendTab::Local => 268.0 + extra_h,
+            BackendTab::Wsl => 300.0 + extra_h,
+            BackendTab::Ssh => 320.0 + extra_h,
         };
         let screen = centered_modal_pos(ctx, 500.0, modal_h);
         egui::Window::new("new_workspace_modal")
@@ -192,6 +202,18 @@ impl NewWorkspaceModal {
                         .size(11.5)
                         .color(Color32::from_rgb(155, 165, 185)),
                     );
+                    if let Some(root) = allowed_root {
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "🔒 Folder Lock Active — local workspaces must stay inside: {}",
+                                display_clean_path(root)
+                            ))
+                            .size(11.0)
+                            .color(Color32::from_rgb(125, 225, 165))
+                            .strong(),
+                        );
+                    }
                     ui.add_space(6.0);
 
                     ui.horizontal(|ui| {
@@ -201,6 +223,8 @@ impl NewWorkspaceModal {
                     });
                     ui.separator();
                     ui.add_space(6.0);
+
+                    let mut local_path_error: Option<String> = None;
 
                     match self.backend_tab {
                         BackendTab::Local => {
@@ -219,11 +243,30 @@ impl NewWorkspaceModal {
                                 let btn_text = if is_browsing { "Choosing..." } else { "Browse..." };
                                 if ui.add_enabled(!is_browsing, egui::Button::new(btn_text)).clicked()
                                 {
-                                    let initial = PathBuf::from(self.path_input.trim());
+                                    let candidate = PathBuf::from(self.path_input.trim());
+                                    let initial = allowed_root
+                                        .filter(|r| {
+                                            validate_workspace_path(&candidate, Some(r)).is_err()
+                                        })
+                                        .map(Path::to_path_buf)
+                                        .unwrap_or(candidate);
                                     self.picker_rx =
                                         Some(spawn_folder_picker_async(Some(initial), ctx.clone()));
                                 }
                             });
+                            if let Err(err) = validate_workspace_path(
+                                &PathBuf::from(self.path_input.trim()),
+                                allowed_root,
+                            ) {
+                                local_path_error = Some(err.to_string());
+                            }
+                            if let Some(ref err_msg) = local_path_error {
+                                ui.label(
+                                    egui::RichText::new(format!("⚠ {err_msg}"))
+                                        .size(11.0)
+                                        .color(Color32::from_rgb(245, 110, 110)),
+                                );
+                            }
                         }
                         BackendTab::Wsl => {
                             if !self.detected_wsl_distros.is_empty() {
@@ -319,7 +362,7 @@ impl NewWorkspaceModal {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let valid_name = !self.name.trim().is_empty();
                         let valid_backend = match self.backend_tab {
-                            BackendTab::Local => !self.path_input.trim().is_empty(),
+                            BackendTab::Local => local_path_error.is_none(),
                             BackendTab::Wsl => true,
                             BackendTab::Ssh => !self.ssh_target.trim().is_empty(),
                         };
@@ -747,6 +790,84 @@ fn hint_tooltip(response: egui::Response, show_hints: bool, hint: &str) -> egui:
     } else {
         response
     }
+}
+
+/// Render a clear working-directory & folder-lock status bar so users always see where terminals/agents run (`REQ-080`).
+pub fn render_workspace_folder_bar(
+    ui: &mut egui::Ui,
+    cwd: &Path,
+    backend: &WorkspaceBackend,
+    allowed_root: Option<&Path>,
+    sandbox_enabled: bool,
+) -> Option<ToolbarAction> {
+    let mut action = None;
+    let frame = egui::Frame::new()
+        .fill(Color32::from_rgb(16, 19, 28))
+        .stroke(Stroke::new(1.0, Color32::from_rgb(32, 36, 48)))
+        .inner_margin(Vec2::new(8.0, 3.0));
+
+    frame.show(ui, |ui| {
+        ui.horizontal(|ui| {
+            let location = match backend {
+                WorkspaceBackend::Local => display_clean_path(cwd),
+                WorkspaceBackend::Wsl { distro, linux_cwd } => format!(
+                    "WSL {} ({})",
+                    distro.as_deref().unwrap_or("default"),
+                    linux_cwd.as_deref().unwrap_or("~")
+                ),
+                WorkspaceBackend::Ssh {
+                    target, remote_dir, ..
+                } => format!("SSH {} ({})", target, remote_dir.as_deref().unwrap_or("~")),
+            };
+
+            ui.label(
+                egui::RichText::new("📁 Working in:")
+                    .size(11.0)
+                    .color(Color32::from_rgb(150, 160, 180))
+                    .strong(),
+            );
+            ui.label(
+                egui::RichText::new(location)
+                    .size(11.0)
+                    .color(Color32::from_rgb(215, 225, 242)),
+            );
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let lock_btn = if let Some(root) = allowed_root {
+                    let txt = if sandbox_enabled {
+                        format!("🔒 Locked: {} + --sandbox", display_clean_path(root))
+                    } else {
+                        format!("🔒 Locked inside: {}", display_clean_path(root))
+                    };
+                    ui.small_button(
+                        egui::RichText::new(txt)
+                            .size(10.5)
+                            .color(Color32::from_rgb(125, 225, 165))
+                            .strong(),
+                    )
+                    .on_hover_text("Click to manage Safe Folder Lock & agy sandbox settings")
+                } else {
+                    let txt = if sandbox_enabled {
+                        "🛡 Sandbox On • 🔓 Folder Unrestricted"
+                    } else {
+                        "🔓 Unrestricted Folder (Click to Lock…)"
+                    };
+                    ui.small_button(
+                        egui::RichText::new(txt)
+                            .size(10.5)
+                            .color(Color32::from_rgb(245, 190, 95)),
+                    )
+                    .on_hover_text("Restrict where Age Max & agents can open workspaces")
+                };
+
+                if lock_btn.clicked() {
+                    action = Some(ToolbarAction::OpenSafetySettings);
+                }
+            });
+        });
+    });
+
+    action
 }
 
 pub(crate) fn centered_modal_pos(ctx: &egui::Context, width: f32, height: f32) -> Pos2 {
