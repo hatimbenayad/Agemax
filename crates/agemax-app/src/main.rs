@@ -89,6 +89,31 @@ use webview_pane::{render_browser_pane, BrowserPaneAction, WebViewSurface};
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt::init();
 
+    let log_path = directories::ProjectDirs::from("com", "agemax", "AgeMax")
+        .map(|p| p.data_local_dir().join("startup.log"))
+        .unwrap_or_else(|| PathBuf::from("startup.log"));
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(
+        &log_path,
+        format!("Age Max launch at {:?}\n", std::time::SystemTime::now()),
+    );
+
+    let panic_log = log_path.clone();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = format!("Age Max Panic:\n{info}\n");
+        let _ = std::fs::write(&panic_log, &msg);
+        #[cfg(windows)]
+        unsafe {
+            use windows::core::HSTRING;
+            use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+            let title = HSTRING::from("Age Max - Crash");
+            let body = HSTRING::from(msg);
+            let _ = MessageBoxW(None, &body, &title, MB_OK | MB_ICONERROR);
+        }
+    }));
+
     let launch_args = LaunchArgs::parse_from(std::env::args_os());
     let pipe_name = launch_args
         .pipe
@@ -96,6 +121,10 @@ fn main() -> eframe::Result<()> {
         .unwrap_or_else(get_default_pipe_name);
 
     if try_activate_existing_instance(&pipe_name, launch_args.cwd.as_deref()) {
+        let _ = std::fs::write(
+            &log_path,
+            format!("Forwarded activation to running Age Max instance on {pipe_name}\n"),
+        );
         tracing::info!("Forwarded activation to running Age Max instance on {pipe_name}");
         return Ok(());
     }
@@ -112,7 +141,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let res = eframe::run_native(
         "AgeMax",
         native_options,
         Box::new(move |cc| {
@@ -123,7 +152,22 @@ fn main() -> eframe::Result<()> {
                 launch_args,
             )))
         }),
-    )
+    );
+
+    if let Err(ref e) = res {
+        let msg = format!("Age Max failed to start GUI window:\n{e:?}\n");
+        let _ = std::fs::write(&log_path, &msg);
+        #[cfg(windows)]
+        unsafe {
+            use windows::core::HSTRING;
+            use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+            let title = HSTRING::from("Age Max - Startup Error");
+            let body = HSTRING::from(msg);
+            let _ = MessageBoxW(None, &body, &title, MB_OK | MB_ICONERROR);
+        }
+    }
+
+    res
 }
 
 fn parse_capture_inner_size() -> Option<[f32; 2]> {
