@@ -930,6 +930,15 @@ fn render_appearance_tab(ui: &mut egui::Ui, config: &mut AgeMaxConfig) -> bool {
     {
         changed = true;
     }
+    if ui
+        .checkbox(
+            &mut config.general.enable_mica_backdrop,
+            "Windows 11 Mica Translucent Backdrop (transparent chrome; restart for initial glass)",
+        )
+        .changed()
+    {
+        changed = true;
+    }
 
     ui.add_space(10.0);
     ui.label(
@@ -1139,6 +1148,16 @@ fn render_shortcuts_tab(
         if ui.button("Reset Defaults").clicked() {
             *draft = KeybindingsConfig::default();
             *live = draft.clone();
+            *status = Some(Ok(()));
+            changed = true;
+        }
+        if ui
+            .button("Use Ctrl+K Command Palette")
+            .on_hover_text("Overrides terminal Ctrl+K kill-line with Command Palette")
+            .clicked()
+        {
+            draft.command_palette = "Ctrl+K".to_string();
+            live.command_palette = draft.command_palette.clone();
             *status = Some(Ok(()));
             changed = true;
         }

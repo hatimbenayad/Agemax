@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 const COLOR_EASE_SECS: f32 = 0.20;
+const PANE_RECT_EASE_SECS: f32 = 0.14;
+const CONPTY_RESIZE_DEBOUNCE_SECS: f32 = 0.12;
 const DONE_FLASH_SECS: f32 = 1.25;
 const FAILED_PULSE_SECS: f32 = 1.00;
 
@@ -515,6 +517,198 @@ pub fn render_agent_mascot(
     }
 }
 
+/// Frame result of pane layout easing & debounced ConPTY resize gating (`REQ-089`).
+#[derive(Debug, Clone, Copy)]
+pub struct AnimatedPaneRect {
+    pub visual_rect: Rect,
+    pub allow_backend_resize: bool,
+    pub animating: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PaneRectState {
+    start_rect: Rect,
+    current_rect: Rect,
+    target_rect: Rect,
+    anim_started_at: Instant,
+    target_changed_at: Instant,
+    is_initial: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ClosingPaneGhost {
+    rect: Rect,
+    started_at: Instant,
+    fill_color: Color32,
+    border_color: Color32,
+}
+
+/// Smooth ~140 ms open/close/resize visual interpolator paired with ConPTY resize debouncing (`REQ-089`).
+#[derive(Debug, Default)]
+pub struct PaneRectAnimator {
+    rects: HashMap<PaneId, PaneRectState>,
+    closing_ghosts: Vec<ClosingPaneGhost>,
+}
+
+impl PaneRectAnimator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn start_close(
+        &mut self,
+        pane_id: PaneId,
+        fill_color: Color32,
+        border_color: Color32,
+        now: Instant,
+    ) {
+        if let Some(st) = self.rects.remove(&pane_id) {
+            self.closing_ghosts.push(ClosingPaneGhost {
+                rect: st.current_rect,
+                started_at: now,
+                fill_color,
+                border_color,
+            });
+        }
+    }
+
+    /// Interpolate a pane's visual container while debouncing ConPTY/WebView2 resizes until settled.
+    pub fn step(
+        &mut self,
+        pane_id: PaneId,
+        target: Rect,
+        dragging_split: bool,
+        now: Instant,
+    ) -> AnimatedPaneRect {
+        if dragging_split {
+            let state = self.rects.entry(pane_id).or_insert(PaneRectState {
+                start_rect: target,
+                current_rect: target,
+                target_rect: target,
+                anim_started_at: now,
+                target_changed_at: now,
+                is_initial: true,
+            });
+            state.start_rect = target;
+            state.current_rect = target;
+            state.target_rect = target;
+            state.target_changed_at = now;
+            state.is_initial = false;
+            return AnimatedPaneRect {
+                visual_rect: target,
+                allow_backend_resize: true,
+                animating: false,
+            };
+        }
+
+        let state = self.rects.entry(pane_id).or_insert_with(|| {
+            // Subtle crisp expand-in on newly opened pane
+            let inset_start = Rect::from_center_size(
+                target.center(),
+                Vec2::new(
+                    (target.width() * 0.88).max(32.0),
+                    (target.height() * 0.88).max(32.0),
+                ),
+            );
+            PaneRectState {
+                start_rect: inset_start,
+                current_rect: inset_start,
+                target_rect: target,
+                anim_started_at: now,
+                target_changed_at: now,
+                is_initial: true,
+            }
+        });
+
+        if !rects_close(state.target_rect, target) {
+            state.start_rect = state.current_rect;
+            state.target_rect = target;
+            state.anim_started_at = now;
+            state.target_changed_at = now;
+            state.is_initial = false;
+        }
+
+        let elapsed = now
+            .saturating_duration_since(state.anim_started_at)
+            .as_secs_f32();
+        let raw_t = (elapsed / PANE_RECT_EASE_SECS).clamp(0.0, 1.0);
+        let eased = 1.0 - (1.0 - raw_t).powi(3);
+        let visual_rect = lerp_rect(state.start_rect, state.target_rect, eased);
+        state.current_rect = visual_rect;
+
+        let settled = raw_t >= 1.0;
+        let since_change = now
+            .saturating_duration_since(state.target_changed_at)
+            .as_secs_f32();
+        let allow_backend_resize =
+            state.is_initial || settled || since_change >= CONPTY_RESIZE_DEBOUNCE_SECS;
+
+        AnimatedPaneRect {
+            visual_rect,
+            allow_backend_resize,
+            animating: !settled,
+        }
+    }
+
+    /// Render fading/shrinking close ghosts for recently closed panes; returns `true` if still animating.
+    pub fn render_closing_ghosts(&mut self, painter: &egui::Painter, now: Instant) -> bool {
+        self.closing_ghosts.retain(|g| {
+            let elapsed = now.saturating_duration_since(g.started_at).as_secs_f32();
+            if elapsed >= PANE_RECT_EASE_SECS {
+                return false;
+            }
+            let t = (elapsed / PANE_RECT_EASE_SECS).clamp(0.0, 1.0);
+            let scale = 1.0 - 0.12 * t;
+            let r = Rect::from_center_size(
+                g.rect.center(),
+                Vec2::new(g.rect.width() * scale, g.rect.height() * scale),
+            );
+            let alpha = ((1.0 - t) * 185.0) as u8;
+            painter.rect_filled(
+                r,
+                4.0,
+                Color32::from_rgba_unmultiplied(
+                    g.fill_color.r(),
+                    g.fill_color.g(),
+                    g.fill_color.b(),
+                    alpha,
+                ),
+            );
+            painter.rect_stroke(
+                r,
+                4.0,
+                Stroke::new(
+                    1.5,
+                    Color32::from_rgba_unmultiplied(
+                        g.border_color.r(),
+                        g.border_color.g(),
+                        g.border_color.b(),
+                        alpha,
+                    ),
+                ),
+                egui::StrokeKind::Inside,
+            );
+            true
+        });
+        !self.closing_ghosts.is_empty()
+    }
+}
+
+fn rects_close(a: Rect, b: Rect) -> bool {
+    (a.min.x - b.min.x).abs() < 0.5
+        && (a.min.y - b.min.y).abs() < 0.5
+        && (a.max.x - b.max.x).abs() < 0.5
+        && (a.max.y - b.max.y).abs() < 0.5
+}
+
+fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
+    let f = |x: f32, y: f32| x + (y - x) * t;
+    Rect::from_min_max(
+        Pos2::new(f(a.min.x, b.min.x), f(a.min.y, b.min.y)),
+        Pos2::new(f(a.max.x, b.max.x), f(a.max.y, b.max.y)),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,5 +752,35 @@ mod tests {
         let settled_done = anim.compute(pid, AgentStatus::Done, false, None, &theme, later);
         assert!(!settled_done.animating);
         assert!(settled_done.outer_glow_color.is_none());
+    }
+
+    #[test]
+    fn test_pane_rect_animator_debounces_resize_and_settles() {
+        let mut rect_anim = PaneRectAnimator::new();
+        let pid = PaneId::new();
+        let r1 = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let r2 = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 600.0));
+        let t0 = Instant::now();
+
+        // First appearance allows initial PTY sizing cleanly
+        let a0 = rect_anim.step(pid, r1, false, t0);
+        assert!(a0.animating);
+        assert!(a0.allow_backend_resize);
+
+        // Settle first animation
+        let t1 = t0 + std::time::Duration::from_millis(200);
+        let a1 = rect_anim.step(pid, r1, false, t1);
+        assert!(!a1.animating);
+
+        // Layout splits to r2 -> debounces intermediate PTY resize on frame 1 (30ms)
+        let a2 = rect_anim.step(pid, r2, false, t1 + std::time::Duration::from_millis(30));
+        assert!(a2.animating);
+        assert!(!a2.allow_backend_resize);
+
+        // Once eased past 140ms, resize commits and animation sleeps cleanly
+        let a3 = rect_anim.step(pid, r2, false, t1 + std::time::Duration::from_millis(200));
+        assert!(!a3.animating);
+        assert!(a3.allow_backend_resize);
+        assert_eq!(a3.visual_rect, r2);
     }
 }
