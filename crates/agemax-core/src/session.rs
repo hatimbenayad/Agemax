@@ -1,4 +1,5 @@
 use crate::layout::{LayoutTree, PaneId, SplitDirection};
+use crate::workspace::WorkspaceBackend;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -83,6 +84,8 @@ pub struct WorkspaceSnapshot {
     pub name: String,
     pub cwd: PathBuf,
     pub profile: Option<String>,
+    #[serde(default)]
+    pub backend: WorkspaceBackend,
     pub active_tab_index: usize,
     pub tabs: Vec<TabSnapshot>,
 }
@@ -156,6 +159,7 @@ mod tests {
             name: "Main Workspace".to_string(),
             cwd: PathBuf::from("C:\\Projects\\test"),
             profile: Some("default".to_string()),
+            backend: WorkspaceBackend::Local,
             active_tab_index: 0,
             tabs: vec![tab],
         };

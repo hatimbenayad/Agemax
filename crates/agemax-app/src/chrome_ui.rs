@@ -3,6 +3,8 @@ pub use agemax_config::keybindings::KeybindingsConfig;
 use agemax_config::schema::{AgeMaxConfig, UiMode};
 use agemax_core::layout::PaneId;
 use agemax_core::status::AgentStatus;
+use agemax_core::workspace::WorkspaceBackend;
+use agemax_term::detect_wsl_distros;
 use crossbeam_channel::Receiver;
 use eframe::egui::{self, Color32, Key, Pos2, Rect, Stroke, Vec2};
 use std::path::PathBuf;
@@ -16,6 +18,9 @@ pub enum ToolbarAction {
     SplitRight,
     SplitDown,
     LaunchAgy,
+    OpenBrowserPane,
+    OpenAcpPanel,
+    LaunchTeamGrid,
     OpenCommandPalette,
     ToggleNotifications,
     OpenViewSettings,
@@ -39,7 +44,23 @@ pub enum RenameTarget {
     Tab { ws_index: usize, tab_index: usize },
 }
 
-/// Modal state for picking a project folder and creating a named Workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackendTab {
+    #[default]
+    Local,
+    Wsl,
+    Ssh,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewWorkspaceRequest {
+    pub name: String,
+    pub cwd: PathBuf,
+    pub launch_agy: bool,
+    pub backend: WorkspaceBackend,
+}
+
+/// Modal state for creating a Workspace across Local, WSL, or Remote SSH backends.
 #[derive(Debug)]
 pub struct NewWorkspaceModal {
     pub is_open: bool,
@@ -47,6 +68,13 @@ pub struct NewWorkspaceModal {
     pub path_input: String,
     pub name_manually_edited: bool,
     pub launch_agy: bool,
+    backend_tab: BackendTab,
+    wsl_distro: String,
+    wsl_linux_cwd: String,
+    detected_wsl_distros: Vec<String>,
+    ssh_target: String,
+    ssh_port: String,
+    ssh_remote_dir: String,
     picker_rx: Option<Receiver<Option<PathBuf>>>,
 }
 
@@ -64,12 +92,20 @@ impl NewWorkspaceModal {
             path_input: String::new(),
             name_manually_edited: false,
             launch_agy: false,
+            backend_tab: BackendTab::Local,
+            wsl_distro: String::new(),
+            wsl_linux_cwd: "~".to_string(),
+            detected_wsl_distros: Vec::new(),
+            ssh_target: String::new(),
+            ssh_port: String::new(),
+            ssh_remote_dir: "~".to_string(),
             picker_rx: None,
         }
     }
 
     pub fn open(&mut self, default_dir: &std::path::Path, default_index: usize) {
         self.is_open = true;
+        self.backend_tab = BackendTab::Local;
         self.path_input = default_dir.to_string_lossy().to_string();
         self.name = default_dir
             .file_name()
@@ -79,6 +115,12 @@ impl NewWorkspaceModal {
             .unwrap_or_else(|| format!("Workspace {}", default_index));
         self.name_manually_edited = false;
         self.launch_agy = false;
+        self.detected_wsl_distros = detect_wsl_distros();
+        if self.wsl_distro.is_empty() {
+            if let Some(first) = self.detected_wsl_distros.first() {
+                self.wsl_distro = first.clone();
+            }
+        }
         self.picker_rx = None;
     }
 
@@ -107,8 +149,8 @@ impl NewWorkspaceModal {
         }
     }
 
-    /// Render the New Workspace modal. Returns `Some((name, path, launch_agy))` upon submission.
-    pub fn show(&mut self, ctx: &egui::Context) -> Option<(String, PathBuf, bool)> {
+    /// Render the New Workspace modal. Returns `Some(NewWorkspaceRequest)` upon submission.
+    pub fn show(&mut self, ctx: &egui::Context) -> Option<NewWorkspaceRequest> {
         if !self.is_open {
             return None;
         }
@@ -122,10 +164,15 @@ impl NewWorkspaceModal {
             return None;
         }
 
-        let screen = centered_modal_pos(ctx, 480.0, 220.0);
+        let modal_h = match self.backend_tab {
+            BackendTab::Local => 255.0,
+            BackendTab::Wsl => 295.0,
+            BackendTab::Ssh => 315.0,
+        };
+        let screen = centered_modal_pos(ctx, 500.0, modal_h);
         egui::Window::new("new_workspace_modal")
             .fixed_pos(screen)
-            .fixed_size(Vec2::new(480.0, 215.0))
+            .fixed_size(Vec2::new(500.0, modal_h))
             .title_bar(false)
             .resizable(false)
             .collapsible(false)
@@ -140,41 +187,116 @@ impl NewWorkspaceModal {
                     );
                     ui.label(
                         egui::RichText::new(
-                            "Pick a project folder and give this workspace a clear name.",
+                            "Choose a Local Windows folder, WSL Linux distro, or OpenSSH host.",
                         )
                         .size(11.5)
                         .color(Color32::from_rgb(155, 165, 185)),
                     );
-                    ui.add_space(10.0);
+                    ui.add_space(6.0);
 
-                    ui.label(
-                        egui::RichText::new("Project Folder")
-                            .size(12.0)
-                            .color(Color32::from_rgb(200, 210, 230)),
-                    );
                     ui.horizontal(|ui| {
-                        let edit = egui::TextEdit::singleline(&mut self.path_input)
-                            .desired_width(340.0)
-                            .text_color(Color32::WHITE);
-                        ui.add(edit);
-
-                        let is_browsing = self.picker_rx.is_some();
-                        let btn_text = if is_browsing {
-                            "Choosing..."
-                        } else {
-                            "Browse..."
-                        };
-                        if ui
-                            .add_enabled(!is_browsing, egui::Button::new(btn_text))
-                            .clicked()
-                        {
-                            let initial = PathBuf::from(self.path_input.trim());
-                            self.picker_rx =
-                                Some(spawn_folder_picker_async(Some(initial), ctx.clone()));
-                        }
+                        ui.selectable_value(&mut self.backend_tab, BackendTab::Local, "💻 Local Folder");
+                        ui.selectable_value(&mut self.backend_tab, BackendTab::Wsl, "🐧 WSL Linux");
+                        ui.selectable_value(&mut self.backend_tab, BackendTab::Ssh, "☁ Remote SSH");
                     });
+                    ui.separator();
+                    ui.add_space(6.0);
 
-                    ui.add_space(8.0);
+                    match self.backend_tab {
+                        BackendTab::Local => {
+                            ui.label(
+                                egui::RichText::new("Project Folder")
+                                    .size(12.0)
+                                    .color(Color32::from_rgb(200, 210, 230)),
+                            );
+                            ui.horizontal(|ui| {
+                                let edit = egui::TextEdit::singleline(&mut self.path_input)
+                                    .desired_width(355.0)
+                                    .text_color(Color32::WHITE);
+                                ui.add(edit);
+
+                                let is_browsing = self.picker_rx.is_some();
+                                let btn_text = if is_browsing { "Choosing..." } else { "Browse..." };
+                                if ui.add_enabled(!is_browsing, egui::Button::new(btn_text)).clicked()
+                                {
+                                    let initial = PathBuf::from(self.path_input.trim());
+                                    self.picker_rx =
+                                        Some(spawn_folder_picker_async(Some(initial), ctx.clone()));
+                                }
+                            });
+                        }
+                        BackendTab::Wsl => {
+                            if !self.detected_wsl_distros.is_empty() {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Detected:");
+                                    for d in &self.detected_wsl_distros {
+                                        if ui
+                                            .selectable_label(self.wsl_distro == *d, d.as_str())
+                                            .clicked()
+                                        {
+                                            self.wsl_distro = d.clone();
+                                            if !self.name_manually_edited {
+                                                self.name = format!("WSL ({})", d);
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                            ui.horizontal(|ui| {
+                                ui.label("Distro (optional):");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.wsl_distro)
+                                        .desired_width(180.0)
+                                        .hint_text("Default distro"),
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Linux Path:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.wsl_linux_cwd)
+                                        .desired_width(280.0)
+                                        .hint_text("~ or /home/user/repo"),
+                                );
+                            });
+                        }
+                        BackendTab::Ssh => {
+                            ui.horizontal(|ui| {
+                                ui.label("SSH Target:");
+                                let resp = ui.add(
+                                    egui::TextEdit::singleline(&mut self.ssh_target)
+                                        .desired_width(240.0)
+                                        .hint_text("user@host or ~/.ssh/config alias"),
+                                );
+                                if resp.changed() && !self.name_manually_edited {
+                                    let t = self.ssh_target.trim();
+                                    if !t.is_empty() {
+                                        self.name = format!("SSH: {t}");
+                                    }
+                                }
+                                ui.label("Port:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.ssh_port)
+                                        .desired_width(55.0)
+                                        .hint_text("22"),
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Remote Dir:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.ssh_remote_dir)
+                                        .desired_width(280.0)
+                                        .hint_text("~ or /srv/app"),
+                                );
+                            });
+                            ui.label(
+                                egui::RichText::new("Uses Windows OpenSSH (ssh.exe / ssh-agent); zero passwords stored by Age Max.")
+                                    .size(10.5)
+                                    .color(Color32::from_rgb(145, 155, 175)),
+                            );
+                        }
+                    }
+
+                    ui.add_space(6.0);
                     ui.label(
                         egui::RichText::new("Workspace Name")
                             .size(12.0)
@@ -187,29 +309,64 @@ impl NewWorkspaceModal {
                         self.name_manually_edited = true;
                     }
 
-                    ui.add_space(8.0);
+                    ui.add_space(6.0);
                     ui.checkbox(
                         &mut self.launch_agy,
                         "Start Antigravity Agent (agy) inside this workspace immediately",
                     );
 
-                    ui.add_space(12.0);
+                    ui.add_space(10.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let valid_name = !self.name.trim().is_empty();
-                        let valid_path = !self.path_input.trim().is_empty();
+                        let valid_backend = match self.backend_tab {
+                            BackendTab::Local => !self.path_input.trim().is_empty(),
+                            BackendTab::Wsl => true,
+                            BackendTab::Ssh => !self.ssh_target.trim().is_empty(),
+                        };
                         if ui
                             .add_enabled(
-                                valid_name && valid_path,
+                                valid_name && valid_backend,
                                 egui::Button::new("Create Workspace"),
                             )
                             .clicked()
-                            || (valid_name && valid_path && ui.input(|i| i.key_pressed(Key::Enter)))
+                            || (valid_name
+                                && valid_backend
+                                && ui.input(|i| i.key_pressed(Key::Enter)))
                         {
-                            submitted = Some((
-                                self.name.trim().to_string(),
-                                PathBuf::from(self.path_input.trim()),
-                                self.launch_agy,
-                            ));
+                            let backend = match self.backend_tab {
+                                BackendTab::Local => WorkspaceBackend::Local,
+                                BackendTab::Wsl => WorkspaceBackend::Wsl {
+                                    distro: {
+                                        let d = self.wsl_distro.trim();
+                                        if d.is_empty() { None } else { Some(d.to_string()) }
+                                    },
+                                    linux_cwd: {
+                                        let c = self.wsl_linux_cwd.trim();
+                                        if c.is_empty() { None } else { Some(c.to_string()) }
+                                    },
+                                },
+                                BackendTab::Ssh => WorkspaceBackend::Ssh {
+                                    target: self.ssh_target.trim().to_string(),
+                                    port: self.ssh_port.trim().parse::<u16>().ok(),
+                                    remote_dir: {
+                                        let c = self.ssh_remote_dir.trim();
+                                        if c.is_empty() { None } else { Some(c.to_string()) }
+                                    },
+                                },
+                            };
+                            let fallback_cwd = std::env::current_dir()
+                                .unwrap_or_else(|_| PathBuf::from("."));
+                            let cwd = if self.backend_tab == BackendTab::Local {
+                                PathBuf::from(self.path_input.trim())
+                            } else {
+                                fallback_cwd
+                            };
+                            submitted = Some(NewWorkspaceRequest {
+                                name: self.name.trim().to_string(),
+                                cwd,
+                                launch_agy: self.launch_agy,
+                                backend,
+                            });
                             should_close = true;
                         }
                         if ui.button("Cancel").clicked() {
@@ -388,6 +545,36 @@ pub fn render_top_toolbar(
                 action = Some(ToolbarAction::LaunchAgy);
             }
 
+            if hint_tooltip(
+                ui.button("🌐 Preview"),
+                show_hints,
+                "Open an embedded WebView2 browser preview split pane",
+            )
+            .clicked()
+            {
+                action = Some(ToolbarAction::OpenBrowserPane);
+            }
+
+            if hint_tooltip(
+                ui.button("🤖 ACP"),
+                show_hints,
+                "Switch active pane to live Antigravity ACP visual card panel",
+            )
+            .clicked()
+            {
+                action = Some(ToolbarAction::OpenAcpPanel);
+            }
+
+            if hint_tooltip(
+                ui.button("👥 Team"),
+                show_hints,
+                "Create a coordinated multi-agent team split grid tab",
+            )
+            .clicked()
+            {
+                action = Some(ToolbarAction::LaunchTeamGrid);
+            }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let target_mode = match config.general.ui_mode {
                     UiMode::Guided => UiMode::Minimal,
@@ -450,6 +637,7 @@ pub struct PaneHeaderProps<'a> {
     pub is_zoomed: bool,
     pub show_hints: bool,
     pub keybindings: &'a KeybindingsConfig,
+    pub team_role: Option<(&'a str, bool)>,
 }
 
 /// Render a slim 26px per-pane action header bar in Guided mode.
@@ -490,6 +678,19 @@ pub fn render_pane_header(
                         .color(status_color)
                         .strong(),
                 );
+                if let Some((role, is_coord)) = props.team_role {
+                    let role_color = if is_coord {
+                        Color32::from_rgb(130, 165, 255)
+                    } else {
+                        Color32::from_rgb(115, 215, 185)
+                    };
+                    ui.label(
+                        egui::RichText::new(format!("• 👥 {role}"))
+                            .size(10.5)
+                            .color(role_color)
+                            .strong(),
+                    );
+                }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if hint_tooltip(ui.small_button("×"), props.show_hints, &kb.close_pane)

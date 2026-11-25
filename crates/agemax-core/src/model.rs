@@ -113,3 +113,11 @@ pub enum SurfaceKind {
         session_id: Option<String>,
     },
 }
+
+/// Metadata linking panes in a multi-agent team layout (Unit 7 §C).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamRoleMeta {
+    pub group_id: Uuid,
+    pub role_name: String,
+    pub is_coordinator: bool,
+}

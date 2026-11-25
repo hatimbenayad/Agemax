@@ -61,6 +61,20 @@ pub enum IpcAppCommand {
         cwd: Option<String>,
         reply: oneshot::Sender<Value>,
     },
+    BrowserOpen {
+        url: String,
+        pane_id: Option<PaneId>,
+        reply: oneshot::Sender<Value>,
+    },
+    BrowserScreenshot {
+        pane_id: Option<PaneId>,
+        reply: oneshot::Sender<Value>,
+    },
+    BrowserEval {
+        pane_id: Option<PaneId>,
+        script: String,
+        reply: oneshot::Sender<Value>,
+    },
 }
 
 pub fn start_ipc_server(
@@ -221,6 +235,43 @@ pub fn start_ipc_server(
                             let cwd = req.params["cwd"].as_str().map(|s| s.to_string());
                             IpcAppCommand::Activate {
                                 cwd,
+                                reply: reply_tx,
+                            }
+                        }
+                        "browser.open" => {
+                            let url = req.params["url"]
+                                .as_str()
+                                .unwrap_or("https://example.com")
+                                .to_string();
+                            let pane_id = req.params["pane_id"]
+                                .as_str()
+                                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                                .map(PaneId);
+                            IpcAppCommand::BrowserOpen {
+                                url,
+                                pane_id,
+                                reply: reply_tx,
+                            }
+                        }
+                        "browser.screenshot" => {
+                            let pane_id = req.params["pane_id"]
+                                .as_str()
+                                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                                .map(PaneId);
+                            IpcAppCommand::BrowserScreenshot {
+                                pane_id,
+                                reply: reply_tx,
+                            }
+                        }
+                        "browser.eval" => {
+                            let script = req.params["script"].as_str().unwrap_or("").to_string();
+                            let pane_id = req.params["pane_id"]
+                                .as_str()
+                                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                                .map(PaneId);
+                            IpcAppCommand::BrowserEval {
+                                pane_id,
+                                script,
                                 reply: reply_tx,
                             }
                         }
