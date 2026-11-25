@@ -1,13 +1,19 @@
+use crate::telemetry::{format_elapsed_compact, render_sparkline, SPARKLINE_BUCKETS};
 use crate::visual_alive::ThemeChromeColors;
 use agemax_config::theme::ResolvedTheme;
 use agemax_core::status::AgentStatus;
 use agemax_core::workspace::Workspace;
+use agemax_term::metadata::GitDiffStat;
 use eframe::egui::{self, Color32, Stroke, Vec2};
 
 #[derive(Debug, Clone, Default)]
 pub struct SidebarWorkspaceMeta {
     pub unread_count: usize,
     pub latest_snippet: Option<String>,
+    pub last_output_line: Option<String>,
+    pub working_elapsed_secs: Option<u64>,
+    pub git_stats: Option<GitDiffStat>,
+    pub sparkline: [u32; SPARKLINE_BUCKETS],
     pub status: Option<AgentStatus>,
 }
 
@@ -133,7 +139,16 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                                     ui.label(
                                         egui::RichText::new(status.icon())
                                             .size(11.0)
-                                            .color(Color32::from_rgb(180, 185, 200)),
+                                            .color(chrome.text_muted),
+                                    );
+                                }
+
+                                if let Some(elapsed) = meta.working_elapsed_secs {
+                                    ui.label(
+                                        egui::RichText::new(format_elapsed_compact(elapsed))
+                                            .size(10.0)
+                                            .color(chrome.accent)
+                                            .strong(),
                                     );
                                 }
 
@@ -143,14 +158,6 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                                             .size(11.0)
                                             .color(Color32::from_rgb(245, 175, 45))
                                             .strong(),
-                                    );
-                                }
-
-                                if let Some(branch) = &ws.git_branch {
-                                    ui.label(
-                                        egui::RichText::new(format!("⎇ {}", branch))
-                                            .size(10.0)
-                                            .color(Color32::from_rgb(110, 190, 140)),
                                     );
                                 }
 
@@ -189,15 +196,65 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                                 ui.label(
                                     egui::RichText::new(subtitle)
                                         .size(10.0)
-                                        .color(Color32::from_rgb(110, 115, 130)),
+                                        .color(chrome.text_muted),
+                                );
+                                if let Some(branch) = &ws.git_branch {
+                                    ui.label(
+                                        egui::RichText::new(format!("⎇ {branch}"))
+                                            .size(10.0)
+                                            .color(Color32::from_rgb(110, 190, 140)),
+                                    );
+                                }
+                                if let Some(stat) = meta.git_stats {
+                                    if stat.has_changes() {
+                                        ui.label(
+                                            egui::RichText::new(format!("+{}", stat.insertions))
+                                                .size(10.0)
+                                                .color(Color32::from_rgb(80, 215, 130)),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(format!("-{}", stat.deletions))
+                                                .size(10.0)
+                                                .color(Color32::from_rgb(240, 105, 105)),
+                                        );
+                                    }
+                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let (srect, _) = ui.allocate_exact_size(
+                                            Vec2::new(42.0, 11.0),
+                                            egui::Sense::hover(),
+                                        );
+                                        render_sparkline(
+                                            ui.painter(),
+                                            srect,
+                                            &meta.sparkline,
+                                            chrome.accent,
+                                            chrome.panel_stroke,
+                                        );
+                                    },
                                 );
                             });
 
                             if let Some(snippet) = &meta.latest_snippet {
-                                ui.label(
-                                    egui::RichText::new(format!("⚠ {}", snippet))
-                                        .size(10.0)
-                                        .color(Color32::from_rgb(245, 175, 45)),
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(format!("⚠ {}", snippet))
+                                            .size(10.0)
+                                            .color(Color32::from_rgb(245, 175, 45)),
+                                    )
+                                    .truncate(),
+                                );
+                            } else if let Some(last_line) = &meta.last_output_line {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(format!("› {}", last_line))
+                                            .size(10.0)
+                                            .monospace()
+                                            .color(chrome.text_muted),
+                                    )
+                                    .truncate(),
                                 );
                             }
                         }

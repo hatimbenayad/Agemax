@@ -199,6 +199,8 @@ pub fn start_ipc_server(
                             let status_str = req.params["status"].as_str().unwrap_or("idle");
                             let status = match status_str {
                                 "waiting" => AgentStatus::WaitingForInput,
+                                "thinking" => AgentStatus::Thinking,
+                                "tool" | "running_tool" => AgentStatus::RunningTool,
                                 "working" => AgentStatus::Working,
                                 "done" => AgentStatus::Done,
                                 "failed" => AgentStatus::Failed,

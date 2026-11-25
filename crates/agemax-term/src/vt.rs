@@ -317,6 +317,24 @@ impl TerminalGrid {
         find_http_url_at_col(&line, col)
     }
 
+    /// Extract the bottom-most non-empty trimmed line from the visible viewport (for Mission Control cards).
+    pub fn last_non_empty_line(&self) -> Option<String> {
+        let mut r = self.rows;
+        while r > 0 {
+            r -= 1;
+            let text = self.render_viewport_line_text(r);
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                let mut out: String = trimmed.chars().take(120).collect();
+                if trimmed.chars().count() > 120 {
+                    out.push('…');
+                }
+                return Some(out);
+            }
+        }
+        None
+    }
+
     pub fn term(&self) -> &Term<NullEventListener> {
         &self.term
     }

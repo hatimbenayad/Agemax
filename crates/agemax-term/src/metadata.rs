@@ -40,6 +40,60 @@ pub fn detect_git_branch(start_dir: &Path) -> Option<String> {
     None
 }
 
+/// Aggregated line churn statistics for a workspace working tree (`REQ-087`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GitDiffStat {
+    pub files_changed: usize,
+    pub insertions: usize,
+    pub deletions: usize,
+}
+
+impl GitDiffStat {
+    pub fn has_changes(&self) -> bool {
+        self.insertions > 0 || self.deletions > 0 || self.files_changed > 0
+    }
+}
+
+/// Parses output of `git diff --shortstat` (e.g., `" 3 files changed, 42 insertions(+), 7 deletions(-)"`).
+pub fn parse_git_shortstat(output: &str) -> GitDiffStat {
+    let mut stat = GitDiffStat::default();
+    for segment in output.split(',') {
+        let s = segment.trim();
+        let num = s
+            .split_whitespace()
+            .next()
+            .and_then(|tok| tok.parse::<usize>().ok());
+        if let Some(val) = num {
+            if s.contains("file") {
+                stat.files_changed = val;
+            } else if s.contains("insertion") {
+                stat.insertions = val;
+            } else if s.contains("deletion") {
+                stat.deletions = val;
+            }
+        }
+    }
+    stat
+}
+
+/// Runs `git diff --shortstat` on `repo_dir`. MUST only be invoked from throttled background worker threads.
+pub fn detect_git_diff_stats(repo_dir: &Path) -> Option<GitDiffStat> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["-C"]).arg(repo_dir).args(["diff", "--shortstat"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Some(parse_git_shortstat(&stdout))
+}
+
 /// Detects active local TCP listening ports on Windows.
 pub fn scan_listening_ports() -> Vec<u16> {
     // Lightweight scan or parser for active ports
@@ -70,4 +124,30 @@ pub fn scan_listening_ports() -> Vec<u16> {
     }
     ports.sort_unstable();
     ports
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_git_shortstat_variants() {
+        assert_eq!(
+            parse_git_shortstat(" 3 files changed, 42 insertions(+), 7 deletions(-)\n"),
+            GitDiffStat {
+                files_changed: 3,
+                insertions: 42,
+                deletions: 7,
+            }
+        );
+        assert_eq!(
+            parse_git_shortstat(" 1 file changed, 15 insertions(+)"),
+            GitDiffStat {
+                files_changed: 1,
+                insertions: 15,
+                deletions: 0,
+            }
+        );
+        assert_eq!(parse_git_shortstat(""), GitDiffStat::default());
+    }
 }

@@ -161,10 +161,15 @@ impl PaneVisualAnimator {
         let mut border_width = if is_focused { 1.6 } else { 1.0 };
 
         match status {
-            AgentStatus::Working => {
-                // Gentle breathing pulse while actively working.
-                let wave = 0.5 + 0.5 * (elapsed_state * 3.0).sin();
-                let glow_alpha = (30.0 + wave * 65.0) as u8;
+            AgentStatus::Working | AgentStatus::Thinking => {
+                // Gentle breathing pulse while thinking or actively working.
+                let speed = if status == AgentStatus::Thinking {
+                    2.4
+                } else {
+                    3.2
+                };
+                let wave = 0.5 + 0.5 * (elapsed_state * speed).sin();
+                let glow_alpha = (28.0 + wave * 65.0) as u8;
                 outer_glow_color = Some(Color32::from_rgba_unmultiplied(
                     border_color.r(),
                     border_color.g(),
@@ -173,6 +178,20 @@ impl PaneVisualAnimator {
                 ));
                 outer_glow_width = 3.5 + wave * 1.5;
                 border_width = if is_focused { 2.0 } else { 1.6 };
+                continuous_anim = true;
+            }
+            AgentStatus::RunningTool => {
+                // Crisper faster pulse for active tool invocation.
+                let wave = 0.5 + 0.5 * (elapsed_state * 5.2).sin();
+                let glow_alpha = (42.0 + wave * 75.0) as u8;
+                outer_glow_color = Some(Color32::from_rgba_unmultiplied(
+                    border_color.r(),
+                    border_color.g(),
+                    border_color.b(),
+                    glow_alpha,
+                ));
+                outer_glow_width = 4.0 + wave * 1.8;
+                border_width = if is_focused { 2.2 } else { 1.8 };
                 continuous_anim = true;
             }
             AgentStatus::WaitingForInput => {
@@ -259,7 +278,8 @@ fn target_rgb_for_state(
         AgentStatus::WaitingForInput => theme.ring_waiting,
         AgentStatus::Done => theme.ring_done,
         AgentStatus::Failed => theme.ring_failed,
-        AgentStatus::Working => working_glow_rgb(theme),
+        AgentStatus::Working | AgentStatus::Thinking => working_glow_rgb(theme),
+        AgentStatus::RunningTool => tool_glow_rgb(theme),
         AgentStatus::Idle => {
             if is_focused {
                 theme.active_border
@@ -279,6 +299,16 @@ fn working_glow_rgb(theme: &ResolvedTheme) -> (u8, u8, u8) {
         ((ar as u16 * 3 + dr as u16) / 4) as u8,
         ((ag as u16 * 3 + dg as u16) / 4) as u8,
         ((ab as u16 * 3 + db as u16) / 4) as u8,
+    )
+}
+
+fn tool_glow_rgb(theme: &ResolvedTheme) -> (u8, u8, u8) {
+    let (ar, ag, ab) = theme.active_border;
+    let (wr, wg, wb) = theme.ring_waiting;
+    (
+        ((ar as u16 * 3 + wr as u16) / 4) as u8,
+        ((ag as u16 * 3 + wg as u16) / 4) as u8,
+        ((ab as u16 * 3 + wb as u16) / 4) as u8,
     )
 }
 
@@ -308,11 +338,15 @@ pub fn render_agent_mascot(
             theme.inactive_border.1.saturating_add(45),
             theme.inactive_border.2.saturating_add(55),
         ),
-        AgentStatus::Working => Color32::from_rgb(
+        AgentStatus::Working | AgentStatus::Thinking => Color32::from_rgb(
             theme.active_border.0,
             theme.active_border.1,
             theme.active_border.2,
         ),
+        AgentStatus::RunningTool => {
+            let rgb = tool_glow_rgb(theme);
+            Color32::from_rgb(rgb.0, rgb.1, rgb.2)
+        }
         AgentStatus::WaitingForInput => Color32::from_rgb(
             theme.ring_waiting.0,
             theme.ring_waiting.1,
@@ -329,7 +363,10 @@ pub fn render_agent_mascot(
     };
 
     let bob_y = match status {
-        AgentStatus::Working => (time_secs * 6.5).sin() as f32 * (w * 0.06),
+        AgentStatus::Thinking => (time_secs * 3.8).sin() as f32 * (w * 0.05),
+        AgentStatus::Working | AgentStatus::RunningTool => {
+            (time_secs * 7.2).sin() as f32 * (w * 0.06)
+        }
         AgentStatus::Done => -((time_secs * 7.5).sin().abs() as f32) * (w * 0.08),
         AgentStatus::Failed => (time_secs * 18.0).sin() as f32 * (w * 0.04),
         AgentStatus::WaitingForInput => (time_secs * 3.5).sin() as f32 * (w * 0.04),
@@ -391,13 +428,30 @@ pub fn render_agent_mascot(
                 Stroke::new(1.3, accent),
             );
         }
-        AgentStatus::Working => {
-            // Active glowing visor dots + tiny alternating typing paws
+        AgentStatus::Thinking => {
+            let er = (w * 0.075).max(1.4);
+            let blink = 0.55 + 0.45 * (time_secs * 3.5).sin() as f32;
+            let glow = Color32::from_rgba_unmultiplied(
+                accent.r(),
+                accent.g(),
+                accent.b(),
+                (blink * 255.0) as u8,
+            );
+            painter.circle_filled(left_eye, er, glow);
+            painter.circle_filled(right_eye, er, glow);
+        }
+        AgentStatus::Working | AgentStatus::RunningTool => {
+            // Active glowing visor dots + alternating typing/tool paws
             let er = (w * 0.075).max(1.4);
             painter.circle_filled(left_eye, er, accent);
             painter.circle_filled(right_eye, er, accent);
 
-            let tap_phase = (time_secs * 9.0).sin() as f32;
+            let freq = if status == AgentStatus::RunningTool {
+                12.0
+            } else {
+                9.0
+            };
+            let tap_phase = (time_secs * freq).sin() as f32;
             let paw_y_l = body_rect.max.y + w * 0.05 + tap_phase * (w * 0.05);
             let paw_y_r = body_rect.max.y + w * 0.05 - tap_phase * (w * 0.05);
             painter.circle_filled(

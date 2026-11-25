@@ -135,4 +135,9 @@ impl TerminalSurface {
     pub fn grid_arc(&self) -> Arc<RwLock<TerminalGrid>> {
         self.grid.clone()
     }
+
+    /// Bottom-most non-empty visible terminal line, clamped for compact card previews.
+    pub fn last_non_empty_line(&self) -> Option<String> {
+        self.grid.read().last_non_empty_line()
+    }
 }
