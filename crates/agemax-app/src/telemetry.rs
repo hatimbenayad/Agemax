@@ -374,6 +374,18 @@ mod tests {
     }
 
     #[test]
+    fn test_system_stats_poller_live_windows() {
+        let times = sample_system_times();
+        let ram = sample_ram_percent();
+        #[cfg(windows)]
+        {
+            assert!(times.is_some(), "sample_system_times failed");
+            assert!(ram.is_some(), "sample_ram_percent failed");
+        }
+        let _ = (times, ram);
+    }
+
+    #[test]
     fn test_pane_telemetry_sparkline_shift_and_elapsed() {
         let t0 = Instant::now();
         let mut tel = PaneTelemetry::new(t0);
