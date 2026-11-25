@@ -34,6 +34,12 @@ pub struct UiTokens {
     pub text_primary: Color32,
     pub text_muted: Color32,
     pub status_running_fg: Color32,
+    pub status_running_bg: Color32,
+    pub status_waiting_fg: Color32,
+    pub status_waiting_bg: Color32,
+    pub status_done_fg: Color32,
+    pub status_error_fg: Color32,
+    pub status_error_bg: Color32,
     pub lock_fill: Color32,
     pub lock_border: Color32,
     pub lock_fg: Color32,
@@ -89,6 +95,12 @@ impl UiTokens {
                 ((fg.2 as u16 * 55 + bg.2 as u16 * 45) / 100) as u8,
             ),
             status_running_fg: Color32::from_rgb(74, 222, 128),
+            status_running_bg: Color32::from_rgb(14, 41, 29),
+            status_waiting_fg: Color32::from_rgb(251, 191, 36),
+            status_waiting_bg: Color32::from_rgb(46, 34, 13),
+            status_done_fg: Color32::from_rgb(148, 163, 184),
+            status_error_fg: Color32::from_rgb(248, 113, 113),
+            status_error_bg: Color32::from_rgb(51, 21, 24),
             lock_fill: if is_light {
                 Color32::from_rgb(220, 248, 234)
             } else {

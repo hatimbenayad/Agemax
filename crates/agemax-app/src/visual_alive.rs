@@ -15,7 +15,6 @@ const FAILED_PULSE_SECS: f32 = 1.00;
 #[derive(Debug, Clone, Copy)]
 pub struct ThemeChromeColors {
     pub panel_bg: Color32,
-    pub panel_alt_bg: Color32,
     pub panel_stroke: Color32,
     pub text_primary: Color32,
     pub text_muted: Color32,
@@ -28,7 +27,6 @@ impl ThemeChromeColors {
         let t = crate::ui_tokens::UiTokens::from_theme(theme);
         Self {
             panel_bg: t.bg_chrome,
-            panel_alt_bg: t.bg_surface,
             panel_stroke: t.border_subtle,
             text_primary: t.text_primary,
             text_muted: t.text_muted,

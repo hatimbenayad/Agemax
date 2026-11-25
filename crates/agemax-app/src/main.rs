@@ -2883,6 +2883,13 @@ impl eframe::App for AgeMaxApp {
                                 if let Some(tab) = ws.active_tab() {
                                     if tab.zoomed_pane.is_none() {
                                         for div in tab.layout.split_dividers(content_rect) {
+                                            ui.painter().line_segment(
+                                                [
+                                                    Pos2::new(div.min.x, div.min.y),
+                                                    Pos2::new(div.max.x, div.max.y),
+                                                ],
+                                                Stroke::new(1.0, tokens.border_subtle),
+                                            );
                                             let hit_rect = match div.direction {
                                                 SplitDirection::Horizontal => Rect::from_min_max(
                                                     Pos2::new(div.min.x - 4.0, div.min.y),
@@ -2961,6 +2968,7 @@ impl eframe::App for AgeMaxApp {
                         if let Some(tab) = ws.active_tab() {
                             let focused_pane = tab.active_pane;
                             let is_zoomed = tab.zoomed_pane.is_some();
+                            let pane_order = tab.layout.panes();
                             let pane_rects = if let Some(zoomed) = tab.zoomed_pane {
                                 let mut m = HashMap::new();
                                 m.insert(zoomed, content_rect);
@@ -2968,6 +2976,7 @@ impl eframe::App for AgeMaxApp {
                             } else {
                                 tab.layout.compute_rects(content_rect)
                             };
+                            let pane_gutter = if pane_rects.len() > 1 { 2.5 } else { 0.0 };
 
                             let font_id = FontId::monospace(self.font_size);
                             let sample = ui.painter().layout_no_wrap(
@@ -2983,7 +2992,8 @@ impl eframe::App for AgeMaxApp {
                                 let target_egui_rect = Rect::from_min_size(
                                     Pos2::new(rect.min.x, rect.min.y),
                                     Vec2::new(rect.width(), rect.height()),
-                                );
+                                )
+                                .shrink(pane_gutter);
                                 let rect_anim = self.rect_animator.step(
                                     pane_id,
                                     target_egui_rect,
@@ -2994,7 +3004,11 @@ impl eframe::App for AgeMaxApp {
                                 let egui_rect = rect_anim.visual_rect;
 
                                 // Pane background and smooth state-colored attention glow (`REQ-084`)
-                                ui.painter().rect_filled(egui_rect, 2.0, pane_bg_color);
+                                ui.painter().rect_filled(
+                                    egui_rect,
+                                    ui_tokens::metrics::RADIUS_SM,
+                                    pane_bg_color,
+                                );
                                 let pane_status = self
                                     .pane_status
                                     .get(&pane_id)
@@ -3019,7 +3033,7 @@ impl eframe::App for AgeMaxApp {
                                 if let Some(glow_col) = border_visual.outer_glow_color {
                                     ui.painter().rect_stroke(
                                         egui_rect.shrink(1.0),
-                                        3.0,
+                                        ui_tokens::metrics::RADIUS_SM,
                                         Stroke::new(border_visual.outer_glow_width, glow_col),
                                         StrokeKind::Inside,
                                     );
@@ -3027,9 +3041,13 @@ impl eframe::App for AgeMaxApp {
 
                                 ui.painter().rect_stroke(
                                     egui_rect,
-                                    2.0,
+                                    ui_tokens::metrics::RADIUS_SM,
                                     Stroke::new(
-                                        border_visual.border_width,
+                                        if is_focused {
+                                            border_visual.border_width.max(1.6)
+                                        } else {
+                                            border_visual.border_width
+                                        },
                                         border_visual.border_color,
                                     ),
                                     StrokeKind::Inside,
@@ -3038,14 +3056,14 @@ impl eframe::App for AgeMaxApp {
                                 if let Some(focus_col) = border_visual.focus_inner_color {
                                     ui.painter().rect_stroke(
                                         egui_rect.shrink(2.0),
-                                        1.5,
+                                        4.0,
                                         Stroke::new(1.0, focus_col),
                                         StrokeKind::Inside,
                                     );
                                 }
 
-                                // Optional Guided mode slim 26px per-pane header bar
-                                let header_h = if show_pane_headers { 26.0 } else { 0.0 };
+                                // Optional Guided mode slim 28px per-pane header bar
+                                let header_h = if show_pane_headers { 28.0 } else { 0.0 };
                                 if show_pane_headers && egui_rect.height() > header_h + 40.0 {
                                     let header_rect = Rect::from_min_max(
                                         egui_rect.min,
@@ -3054,11 +3072,18 @@ impl eframe::App for AgeMaxApp {
                                     let team_role_prop = team_meta
                                         .as_ref()
                                         .map(|m| (m.role_name.as_str(), m.is_coordinator));
+                                    let pane_idx = pane_order
+                                        .iter()
+                                        .position(|&id| id == pane_id)
+                                        .map(|i| i + 1)
+                                        .unwrap_or(1);
+                                    let pane_label = format!("agy-{pane_idx}");
                                     if let Some(act) = render_pane_header(
                                         ui,
                                         PaneHeaderProps {
                                             header_rect,
                                             pane_id,
+                                            pane_label: &pane_label,
                                             status: pane_status,
                                             is_focused,
                                             is_zoomed,

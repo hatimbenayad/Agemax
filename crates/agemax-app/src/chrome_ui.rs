@@ -1,7 +1,7 @@
 use crate::folder_picker::spawn_folder_picker_async;
-use crate::icons::{icon_label, icon_rich, icon_small, icon_text, status_icon, UiIcon};
+use crate::icons::{icon_label, icon_rich, icon_text, UiIcon};
 use crate::ui_tokens::{metrics, UiTokens};
-use crate::visual_alive::{render_agent_mascot, ThemeChromeColors};
+use crate::visual_alive::render_agent_mascot;
 pub use agemax_config::keybindings::KeybindingsConfig;
 use agemax_config::safety::{display_clean_path, validate_workspace_path};
 use agemax_config::schema::{AgeMaxConfig, UiMode};
@@ -1153,6 +1153,7 @@ fn toolbar_divider(ui: &mut egui::Ui, tokens: &UiTokens) {
 pub struct PaneHeaderProps<'a> {
     pub header_rect: Rect,
     pub pane_id: PaneId,
+    pub pane_label: &'a str,
     pub status: AgentStatus,
     pub is_focused: bool,
     pub is_zoomed: bool,
@@ -1163,7 +1164,7 @@ pub struct PaneHeaderProps<'a> {
     pub team_role: Option<(&'a str, bool)>,
 }
 
-/// Render a slim 26px per-pane action header bar in Guided mode.
+/// Render a clean 28px per-pane action header bar with agent label, status capsule, and icon actions.
 pub fn render_pane_header(
     ui: &mut egui::Ui,
     props: PaneHeaderProps<'_>,
@@ -1172,32 +1173,43 @@ pub fn render_pane_header(
     let header_rect = props.header_rect;
     let pane_id = props.pane_id;
     let kb = props.keybindings;
-    let chrome = ThemeChromeColors::from_theme(props.resolved_theme);
+    let tokens = UiTokens::from_theme(props.resolved_theme);
 
     let bg = if props.is_focused {
-        chrome.panel_alt_bg
+        tokens.bg_elevated
     } else {
-        chrome.panel_bg
+        tokens.bg_surface
     };
-    ui.painter().rect_filled(header_rect, 0.0, bg);
+    ui.painter().rect_filled(
+        header_rect,
+        egui::CornerRadius {
+            nw: metrics::RADIUS_SM as u8,
+            ne: metrics::RADIUS_SM as u8,
+            sw: 0,
+            se: 0,
+        },
+        bg,
+    );
     ui.painter().line_segment(
         [
             Pos2::new(header_rect.min.x, header_rect.max.y),
             Pos2::new(header_rect.max.x, header_rect.max.y),
         ],
-        Stroke::new(1.0, chrome.panel_stroke),
+        Stroke::new(1.0, tokens.border_subtle),
     );
 
-    let padded = header_rect.shrink2(Vec2::new(6.0, 2.0));
+    let padded = header_rect.shrink2(Vec2::new(8.0, 3.0));
     ui.scope_builder(
         egui::UiBuilder::new()
             .id_salt(("pane_header", pane_id.0))
             .max_rect(padded),
         |ui| {
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+
                 if props.show_mascot {
                     let (mascot_rect, _) =
-                        ui.allocate_exact_size(Vec2::new(20.0, 18.0), egui::Sense::hover());
+                        ui.allocate_exact_size(Vec2::new(18.0, 16.0), egui::Sense::hover());
                     let time_secs = ui.input(|i| i.time);
                     render_agent_mascot(
                         ui.painter(),
@@ -1207,13 +1219,53 @@ pub fn render_pane_header(
                         props.resolved_theme,
                     );
                 }
-                let (status_label, status_color) = friendly_status_badge(props.status);
-                ui.label(icon_label(
-                    status_icon(props.status),
-                    status_label,
-                    11.0,
-                    Some(status_color),
+
+                ui.label(icon_rich(
+                    UiIcon::Terminal,
+                    12.0,
+                    Some(if props.is_focused {
+                        tokens.text_primary
+                    } else {
+                        tokens.text_muted
+                    }),
                 ));
+                ui.label(
+                    egui::RichText::new(props.pane_label)
+                        .size(12.0)
+                        .color(if props.is_focused {
+                            tokens.text_primary
+                        } else {
+                            tokens.text_muted
+                        })
+                        .strong(),
+                );
+
+                // Rounded status capsule pill matching the mockup (`Running`, `Needs input`, `Done`, etc.)
+                let (status_label, pill_fg, pill_bg, dot_col) =
+                    pane_status_pill(props.status, &tokens);
+                egui::Frame::new()
+                    .fill(pill_bg)
+                    .stroke(Stroke::new(
+                        0.8,
+                        Color32::from_rgba_unmultiplied(pill_fg.r(), pill_fg.g(), pill_fg.b(), 80),
+                    ))
+                    .corner_radius(10.0)
+                    .inner_margin(Vec2::new(7.0, 1.5))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            let (drect, _) =
+                                ui.allocate_exact_size(Vec2::new(6.0, 10.0), egui::Sense::hover());
+                            ui.painter().circle_filled(drect.center(), 2.8, dot_col);
+                            ui.label(
+                                egui::RichText::new(status_label)
+                                    .size(10.5)
+                                    .color(pill_fg)
+                                    .strong(),
+                            );
+                        });
+                    });
+
                 if let Some((role, is_coord)) = props.team_role {
                     let role_color = if is_coord {
                         Color32::from_rgb(130, 165, 255)
@@ -1224,8 +1276,12 @@ pub fn render_pane_header(
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if hint_tooltip(
-                        ui.small_button(icon_rich(UiIcon::X, 11.0, None)),
+                    ui.spacing_mut().item_spacing.x = 4.0;
+
+                    if pane_header_icon_btn(
+                        ui,
+                        UiIcon::X,
+                        &tokens,
                         props.show_hints,
                         &kb.close_pane,
                     )
@@ -1238,17 +1294,15 @@ pub fn render_pane_header(
                     } else {
                         UiIcon::Maximize
                     };
-                    if hint_tooltip(
-                        ui.small_button(icon_rich(zoom_icon, 11.0, None)),
-                        props.show_hints,
-                        &kb.zoom_pane,
-                    )
-                    .clicked()
+                    if pane_header_icon_btn(ui, zoom_icon, &tokens, props.show_hints, &kb.zoom_pane)
+                        .clicked()
                     {
                         action = Some(PaneHeaderAction::ToggleZoom(pane_id));
                     }
-                    if hint_tooltip(
-                        ui.small_button(icon_rich(UiIcon::Rows, 11.0, None)),
+                    if pane_header_icon_btn(
+                        ui,
+                        UiIcon::Rows,
+                        &tokens,
                         props.show_hints,
                         &kb.split_vertical,
                     )
@@ -1256,8 +1310,10 @@ pub fn render_pane_header(
                     {
                         action = Some(PaneHeaderAction::SplitDown(pane_id));
                     }
-                    if hint_tooltip(
-                        ui.small_button(icon_rich(UiIcon::Columns, 11.0, None)),
+                    if pane_header_icon_btn(
+                        ui,
+                        UiIcon::Columns,
+                        &tokens,
                         props.show_hints,
                         &kb.split_horizontal,
                     )
@@ -1265,10 +1321,12 @@ pub fn render_pane_header(
                     {
                         action = Some(PaneHeaderAction::SplitRight(pane_id));
                     }
-                    if hint_tooltip(
-                        ui.small_button(icon_small(UiIcon::Play, "agy")),
+                    if pane_header_icon_btn(
+                        ui,
+                        UiIcon::Play,
+                        &tokens,
                         props.show_hints,
-                        "Launch Antigravity CLI in this pane",
+                        "Start agy in this pane",
                     )
                     .clicked()
                     {
@@ -1282,15 +1340,62 @@ pub fn render_pane_header(
     action
 }
 
-fn friendly_status_badge(status: AgentStatus) -> (&'static str, Color32) {
+fn pane_header_icon_btn(
+    ui: &mut egui::Ui,
+    icon: UiIcon,
+    tokens: &UiTokens,
+    show_hints: bool,
+    hint: &str,
+) -> egui::Response {
+    let btn = egui::Button::new(icon_rich(icon, 11.5, Some(tokens.text_muted)))
+        .fill(Color32::TRANSPARENT)
+        .stroke(Stroke::NONE)
+        .corner_radius(4.0)
+        .min_size(Vec2::new(20.0, 20.0));
+    hint_tooltip(ui.add(btn), show_hints, hint)
+}
+
+fn pane_status_pill(
+    status: AgentStatus,
+    tokens: &UiTokens,
+) -> (&'static str, Color32, Color32, Color32) {
     match status {
-        AgentStatus::Idle => ("Ready", Color32::from_rgb(145, 155, 175)),
-        AgentStatus::Working => ("Working…", Color32::from_rgb(105, 175, 255)),
-        AgentStatus::Thinking => ("Thinking…", Color32::from_rgb(115, 200, 255)),
-        AgentStatus::RunningTool => ("Running Tool…", Color32::from_rgb(245, 195, 85)),
-        AgentStatus::WaitingForInput => ("Needs Answer", Color32::from_rgb(245, 175, 45)),
-        AgentStatus::Done => ("Done", Color32::from_rgb(45, 200, 110)),
-        AgentStatus::Failed => ("Error", Color32::from_rgb(235, 60, 60)),
+        AgentStatus::Idle => (
+            "Ready",
+            tokens.text_muted,
+            tokens.bg_surface,
+            Color32::from_rgb(100, 116, 139),
+        ),
+        AgentStatus::Working | AgentStatus::Thinking => (
+            "Running",
+            tokens.status_running_fg,
+            tokens.status_running_bg,
+            Color32::from_rgb(34, 197, 94),
+        ),
+        AgentStatus::RunningTool => (
+            "Running tool",
+            tokens.status_running_fg,
+            tokens.status_running_bg,
+            Color32::from_rgb(34, 197, 94),
+        ),
+        AgentStatus::WaitingForInput => (
+            "Needs input",
+            tokens.status_waiting_fg,
+            tokens.status_waiting_bg,
+            Color32::from_rgb(245, 158, 11),
+        ),
+        AgentStatus::Done => (
+            "Done",
+            tokens.status_done_fg,
+            tokens.bg_surface,
+            Color32::from_rgb(100, 116, 139),
+        ),
+        AgentStatus::Failed => (
+            "Error",
+            tokens.status_error_fg,
+            tokens.status_error_bg,
+            Color32::from_rgb(239, 68, 68),
+        ),
     }
 }
 
