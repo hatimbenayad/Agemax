@@ -1,6 +1,7 @@
 //! Unit 7 UI components: Live `agy acp` Card Panel renderer and Multi-Agent Team Grid modal.
 
 use crate::chrome_ui::{centered_modal_pos, modal_frame};
+use crate::icons::{icon_label, icon_small, icon_text, text_then_icon, UiIcon};
 use agemax_agy::acp::LiveAcpSession;
 use agemax_core::layout::PaneId;
 use eframe::egui::{self, Color32, Key, Rect, Stroke, Vec2};
@@ -32,12 +33,12 @@ pub fn render_acp_pane(
         |ui| match acp_state {
             AcpPaneState::Failed(err) => {
                 ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new("🤖 Antigravity ACP Panel Unavailable")
-                            .size(14.0)
-                            .color(Color32::from_rgb(245, 175, 45))
-                            .strong(),
-                    );
+                    ui.label(icon_label(
+                        UiIcon::Bot,
+                        "Antigravity ACP Panel Unavailable",
+                        14.0,
+                        Some(Color32::from_rgb(245, 175, 45)),
+                    ));
                     ui.add_space(4.0);
                     ui.label(
                         egui::RichText::new(err.as_str())
@@ -46,10 +47,16 @@ pub fn render_acp_pane(
                     );
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("↻ Retry agy acp").clicked() {
+                        if ui
+                            .button(icon_text(UiIcon::RotateCw, "Retry agy acp"))
+                            .clicked()
+                        {
                             action = Some(AcpPaneAction::Restart(pane_id));
                         }
-                        if ui.button("← Back to Terminal").clicked() {
+                        if ui
+                            .button(icon_text(UiIcon::ArrowLeft, "Back to Terminal"))
+                            .clicked()
+                        {
                             action = Some(AcpPaneAction::SwitchToTerminal(pane_id));
                         }
                     });
@@ -64,12 +71,12 @@ pub fn render_acp_pane(
                             .server_banner
                             .as_deref()
                             .unwrap_or("Connecting agy acp…");
-                        ui.label(
-                            egui::RichText::new(format!("🤖 {banner}"))
-                                .size(12.5)
-                                .color(Color32::from_rgb(130, 195, 255))
-                                .strong(),
-                        );
+                        ui.label(icon_label(
+                            UiIcon::Bot,
+                            banner,
+                            12.5,
+                            Some(Color32::from_rgb(130, 195, 255)),
+                        ));
                         if let Some(st) = &session.state.latest_status {
                             ui.label(
                                 egui::RichText::new(format!("[{st}]"))
@@ -78,10 +85,16 @@ pub fn render_acp_pane(
                             );
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("← Terminal").clicked() {
+                            if ui
+                                .small_button(icon_small(UiIcon::ArrowLeft, "Terminal"))
+                                .clicked()
+                            {
                                 action = Some(AcpPaneAction::SwitchToTerminal(pane_id));
                             }
-                            if ui.small_button("↻ Restart").clicked() {
+                            if ui
+                                .small_button(icon_small(UiIcon::RotateCw, "Restart"))
+                                .clicked()
+                            {
                                 action = Some(AcpPaneAction::Restart(pane_id));
                             }
                         });
@@ -99,11 +112,12 @@ pub fn render_acp_pane(
                                     .strong(),
                             );
                             for t in &session.state.active_tools {
-                                ui.label(
-                                    egui::RichText::new(format!("⟳ {}", t.tool))
-                                        .size(11.0)
-                                        .color(Color32::from_rgb(245, 195, 85)),
-                                );
+                                ui.label(icon_label(
+                                    UiIcon::Loader,
+                                    &t.tool,
+                                    11.0,
+                                    Some(Color32::from_rgb(245, 195, 85)),
+                                ));
                             }
                         });
                     }
@@ -117,11 +131,12 @@ pub fn render_acp_pane(
                                     .strong(),
                             );
                             for art in session.state.recent_artifacts.iter().rev().take(4) {
-                                ui.label(
-                                    egui::RichText::new(format!("📄 {}", art.title))
-                                        .size(11.0)
-                                        .color(Color32::from_rgb(125, 215, 245)),
-                                );
+                                ui.label(icon_label(
+                                    UiIcon::FileText,
+                                    &art.title,
+                                    11.0,
+                                    Some(Color32::from_rgb(125, 215, 245)),
+                                ));
                             }
                         });
                     }
@@ -174,7 +189,15 @@ pub fn render_acp_pane(
                                 .text_color(Color32::WHITE),
                         );
                         let send_clicked = ui
-                            .add_enabled(ready, egui::Button::new("Send ↵"))
+                            .add_enabled(
+                                ready,
+                                egui::Button::new(text_then_icon(
+                                    "Send",
+                                    UiIcon::CornerDownLeft,
+                                    12.0,
+                                    None,
+                                )),
+                            )
                             .clicked();
                         let enter_pressed =
                             resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));

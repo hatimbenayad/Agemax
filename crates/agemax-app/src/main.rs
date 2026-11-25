@@ -5,15 +5,18 @@ mod backdrop_win;
 mod chrome_ui;
 mod command_palette;
 mod folder_picker;
+mod icons;
 mod ipc_bridge;
 mod mission_control;
 mod mouse_ux;
 mod notification_win;
 mod onboarding_settings;
 mod sidebar;
+mod status_bar;
 mod stretch_panels;
 mod tab_bar;
 mod telemetry;
+mod ui_tokens;
 mod visual_alive;
 mod webview_pane;
 
@@ -44,11 +47,11 @@ use agemax_term::vt::GridPoint;
 use agemax_term::PtySystemBackend;
 use backdrop_win::BackdropController;
 use chrome_ui::{
-    render_pane_header, render_top_toolbar, render_workspace_folder_bar, NewWorkspaceModal,
-    NewWorkspaceRequest, PaneHeaderAction, PaneHeaderProps, RenameModal, RenameTarget,
-    ToolbarAction,
+    render_header_strip, render_pane_header, render_top_toolbar, render_workspace_folder_bar,
+    NewWorkspaceModal, NewWorkspaceRequest, PaneHeaderAction, PaneHeaderProps, RenameModal,
+    RenameTarget, ToolbarAction,
 };
-use command_palette::{CommandPalette, PaletteAction};
+use command_palette::{CommandPalette, PaletteAction, PaletteWorkspaceItem};
 use eframe::egui::{self, Color32, FontId, Key, Pos2, Rect, Stroke, StrokeKind, Vec2};
 use ipc_bridge::{start_ipc_server, IpcAppCommand};
 use mission_control::{
@@ -67,6 +70,7 @@ use onboarding_settings::{
     PreflightState, SettingsModal, SettingsTab,
 };
 use sidebar::{render_sidebar, SidebarAction, SidebarProps, SidebarWorkspaceMeta};
+use status_bar::{render_status_bar, StatusBarAction, StatusBarProps};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -75,7 +79,7 @@ use stretch_panels::{
     TeamLauncherModal,
 };
 use tab_bar::{render_tab_bar, TabBarAction};
-use telemetry::{infer_pty_tool_hint, GitStatsPoller, PaneTelemetry};
+use telemetry::{infer_pty_tool_hint, GitStatsPoller, PaneTelemetry, SystemStats, SystemStatsPoller};
 use uuid::Uuid;
 use visual_alive::{PaneRectAnimator, PaneVisualAnimator};
 use webview_pane::{render_browser_pane, BrowserPaneAction, WebViewSurface};
@@ -95,13 +99,14 @@ fn main() -> eframe::Result<()> {
     }
 
     let initial_cfg = AgeMaxConfig::load_or_create_default();
+    let initial_size = parse_capture_inner_size().unwrap_or([1150.0, 720.0]);
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Age Max - Native Agent Multiplexer")
             .with_icon(app_icon::window_icon())
             .with_transparent(initial_cfg.general.enable_mica_backdrop)
-            .with_inner_size([1150.0, 720.0])
-            .with_min_inner_size([450.0, 320.0]),
+            .with_inner_size(initial_size)
+            .with_min_inner_size([900.0, 540.0]),
         ..Default::default()
     };
 
@@ -119,8 +124,32 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+fn parse_capture_inner_size() -> Option<[f32; 2]> {
+    let raw = std::env::var("AGEMAX_CAPTURE_SIZE").ok()?;
+    let (w_str, h_str) = raw.split_once('x')?;
+    let w: f32 = w_str.trim().parse().ok()?;
+    let h: f32 = h_str.trim().parse().ok()?;
+    Some([w.max(320.0), h.max(240.0)])
+}
+
 fn configure_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
+
+    // Register embedded Lucide icon font in its own dedicated font family
+    icons::register_lucide_font(&mut fonts);
+
+    // On Windows, prefer Segoe UI for proportional UI text if available
+    if let Ok(ui_bytes) = std::fs::read("C:\\Windows\\Fonts\\segoeui.ttf") {
+        fonts.font_data.insert(
+            "Segoe UI".to_owned(),
+            std::sync::Arc::new(egui::FontData::from_owned(ui_bytes)),
+        );
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, "Segoe UI".to_owned());
+    }
 
     // On Windows, attempt to load Cascadia Code or Consolas if present
     for path in &[
@@ -162,6 +191,8 @@ pub struct AgeMaxApp {
     agent_conversation_ids: HashMap<PaneId, String>,
     pane_telemetry: HashMap<PaneId, PaneTelemetry>,
     git_stats_poller: GitStatsPoller,
+    system_stats_poller: SystemStatsPoller,
+    system_stats: Option<SystemStats>,
     notification_store: NotificationStore,
     activity_feed: ActivityFeed,
     notification_service: Box<dyn NotificationService>,
@@ -180,7 +211,7 @@ pub struct AgeMaxApp {
     text_selection: Option<TextSelection>,
     active_split_drag: Option<ActiveSplitDrag>,
     context_menu: ContextMenuState,
-    last_light_visuals: Option<bool>,
+    last_theme: Option<agemax_config::theme::ResolvedTheme>,
     visual_animator: PaneVisualAnimator,
     rect_animator: PaneRectAnimator,
     backdrop_ctrl: BackdropController,
@@ -197,6 +228,9 @@ pub struct AgeMaxApp {
     char_height: f32,
     start_time: Instant,
     first_frame_rendered: bool,
+    capture_frames_left: Option<u8>,
+    capture_out_path: Option<PathBuf>,
+    capture_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for AgeMaxApp {
@@ -271,6 +305,7 @@ impl AgeMaxApp {
         command_palette.set_custom_commands(&config.commands);
 
         let initial_font_size = config.general.font_size.clamp(9.0, 32.0);
+        let initial_sidebar_collapsed = config.general.sidebar_collapsed;
         let pending_restore = SessionSnapshot::load_from_file(&SessionSnapshot::default_path())
             .ok()
             .filter(|snap| !snap.workspaces.is_empty());
@@ -299,6 +334,8 @@ impl AgeMaxApp {
             agent_conversation_ids: HashMap::new(),
             pane_telemetry: HashMap::new(),
             git_stats_poller: GitStatsPoller::spawn(cc.map(|c| c.egui_ctx.clone())),
+            system_stats_poller: SystemStatsPoller::spawn(cc.map(|c| c.egui_ctx.clone())),
+            system_stats: None,
             notification_store,
             activity_feed: ActivityFeed::new(),
             notification_service: Box::new(PlatformNotificationService::new()),
@@ -317,7 +354,7 @@ impl AgeMaxApp {
             text_selection: None,
             active_split_drag: None,
             context_menu: ContextMenuState::default(),
-            last_light_visuals: None,
+            last_theme: None,
             visual_animator: PaneVisualAnimator::new(),
             rect_animator: PaneRectAnimator::new(),
             backdrop_ctrl: BackdropController::default(),
@@ -328,12 +365,19 @@ impl AgeMaxApp {
             right_drawer_tab: RightDrawerTab::default(),
             show_grid_view: false,
             show_welcome_view: false,
-            is_sidebar_collapsed: false,
+            is_sidebar_collapsed: initial_sidebar_collapsed,
             font_size: initial_font_size,
             char_width: 8.4,
             char_height: 18.0,
             start_time,
             first_frame_rendered: false,
+            capture_out_path: std::env::var_os("AGEMAX_CAPTURE_SCREENSHOT")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
+            capture_frames_left: std::env::var_os("AGEMAX_CAPTURE_SCREENSHOT")
+                .filter(|v| !v.is_empty())
+                .map(|_| 24),
+            capture_done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -345,6 +389,10 @@ impl AgeMaxApp {
             || self.agent_launcher_modal.is_open
             || self.team_launcher_modal.is_open
             || self.broadcast_modal.is_open
+    }
+
+    fn is_overlay_active(&self, ctx: &egui::Context) -> bool {
+        self.is_modal_open() || self.context_menu.is_open || egui::Popup::is_any_open(ctx)
     }
 
     fn remove_pane_resources(&mut self, pane_id: PaneId) {
@@ -1222,16 +1270,55 @@ impl AgeMaxApp {
         let _ = snapshot.save_to_file(&path);
     }
 
+    fn sync_command_palette_workspaces(&mut self) {
+        let entries: Vec<PaletteWorkspaceItem> = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .map(|(idx, ws)| PaletteWorkspaceItem {
+                id: ws.id,
+                name: ws.name.clone(),
+                cwd_display: ws.cwd.display().to_string(),
+                git_branch: ws.git_branch.clone(),
+                is_active: idx == self.active_workspace_index,
+            })
+            .collect();
+        self.command_palette.sync_workspaces(&entries);
+    }
+
+    fn open_command_palette(&mut self) {
+        self.sync_command_palette_workspaces();
+        self.command_palette.open();
+    }
+
+    fn toggle_sidebar(&mut self) {
+        self.is_sidebar_collapsed = !self.is_sidebar_collapsed;
+        self.config.general.sidebar_collapsed = self.is_sidebar_collapsed;
+        let _ = self.config.save_default();
+    }
+
+    fn select_workspace(&mut self, idx: usize) {
+        if idx < self.workspaces.len() {
+            self.active_workspace_index = idx;
+            self.show_grid_view = false;
+            self.show_welcome_view = false;
+            self.save_session();
+        }
+    }
+
     pub fn execute_palette_action(&mut self, action: PaletteAction) {
         match action {
+            PaletteAction::SwitchWorkspace(ws_id) => {
+                if let Some(pos) = self.workspaces.iter().position(|w| w.id == ws_id) {
+                    self.select_workspace(pos);
+                }
+            }
             PaletteAction::NewTab => self.create_new_tab(),
             PaletteAction::SplitRight => self.split_active_pane(SplitDirection::Horizontal),
             PaletteAction::SplitDown => self.split_active_pane(SplitDirection::Vertical),
             PaletteAction::ClosePane => self.close_active_pane(),
             PaletteAction::ToggleZoom => self.toggle_zoom_active(),
-            PaletteAction::ToggleSidebar => {
-                self.is_sidebar_collapsed = !self.is_sidebar_collapsed;
-            }
+            PaletteAction::ToggleSidebar => self.toggle_sidebar(),
             PaletteAction::JumpUnread => self.jump_to_oldest_unread(),
             PaletteAction::ToggleNotifications => {
                 self.show_notifications_panel = !self.show_notifications_panel;
@@ -1683,7 +1770,7 @@ impl AgeMaxApp {
     }
 
     fn handle_input(&mut self, ctx: &egui::Context, content_rect: CoreRect) {
-        if self.is_modal_open() || self.context_menu.is_open {
+        if self.is_overlay_active(ctx) {
             return;
         }
 
@@ -1743,11 +1830,11 @@ impl AgeMaxApp {
                     // Configurable global shortcuts (dynamic from KeybindingsConfig):
                     let kb = &self.config.keybindings;
                     if self.matches_keybinding(&kb.toggle_sidebar, key, &modifiers) {
-                        self.is_sidebar_collapsed = !self.is_sidebar_collapsed;
+                        self.toggle_sidebar();
                         continue;
                     }
                     if self.matches_keybinding(&kb.command_palette, key, &modifiers) {
-                        self.command_palette.open();
+                        self.open_command_palette();
                         continue;
                     }
                     if self.matches_keybinding(&kb.new_tab, key, &modifiers) {
@@ -1978,8 +2065,23 @@ impl eframe::App for AgeMaxApp {
             .filter(|w| matches!(w.backend, WorkspaceBackend::Local))
             .map(|w| (w.id, w.cwd.clone()))
             .collect();
-        self.git_stats_poller
-            .poll_and_maybe_refresh(|| ws_git_targets, now_instant);
+        if self
+            .git_stats_poller
+            .poll_and_maybe_refresh(|| ws_git_targets, now_instant)
+        {
+            for ws in &mut self.workspaces {
+                if matches!(ws.backend, WorkspaceBackend::Local) {
+                    if let Some(branch) = self.git_stats_poller.branches.get(&ws.id) {
+                        if ws.git_branch != *branch {
+                            ws.git_branch = branch.clone();
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(sys) = self.system_stats_poller.poll() {
+            self.system_stats = Some(sys);
+        }
 
         let mut dirty = false;
         let mut acp_events_to_record: Vec<(PaneId, AcpEvent, AgentStatus)> = Vec::new();
@@ -2141,7 +2243,39 @@ impl eframe::App for AgeMaxApp {
             }
         }
 
-        if dirty {
+        if self.capture_done.load(std::sync::atomic::Ordering::Acquire) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        if let Some(left) = self.capture_frames_left {
+            if left == 0 {
+                self.capture_frames_left = None;
+                if let Some(out_path) = self.capture_out_path.take() {
+                    let done_flag = std::sync::Arc::clone(&self.capture_done);
+                    let repaint_ctx = ctx.clone();
+                    ctx.request_screenshot(move |img| {
+                        let [w, h] = img.size;
+                        let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
+                        ppm.reserve(w * h * 3);
+                        for px in &img.pixels {
+                            ppm.push(px.r());
+                            ppm.push(px.g());
+                            ppm.push(px.b());
+                        }
+                        if let Some(parent) = out_path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::fs::write(&out_path, ppm);
+                        done_flag.store(true, std::sync::atomic::Ordering::Release);
+                        repaint_ctx.request_repaint();
+                    });
+                }
+            } else {
+                self.capture_frames_left = Some(left - 1);
+            }
+        }
+
+        if dirty || self.capture_frames_left.is_some() {
             ctx.request_repaint();
         } else if self.any_pane_animating {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
@@ -2164,14 +2298,10 @@ impl eframe::App for AgeMaxApp {
         let _ = frame;
 
         let resolved_theme = self.config.theme.resolved_rgb();
-        let is_light = resolved_theme.is_light_background();
-        if self.last_light_visuals != Some(is_light) {
-            ui.ctx().set_visuals(if is_light {
-                egui::Visuals::light()
-            } else {
-                egui::Visuals::dark()
-            });
-            self.last_light_visuals = Some(is_light);
+        let tokens = ui_tokens::UiTokens::from_theme(&resolved_theme);
+        if self.last_theme != Some(resolved_theme) {
+            tokens.apply_visuals(ui.ctx());
+            self.last_theme = Some(resolved_theme);
         }
 
         let mica_active = self
@@ -2185,199 +2315,320 @@ impl eframe::App for AgeMaxApp {
         } else {
             color32_from_rgb(bg_rgb)
         };
-        let full_frame = egui::Frame::new().fill(window_fill);
-        full_frame.show(ui, |ui| {
-            ui.horizontal(|ui| {
-                // Prepare mission-control sidebar metadata
-                let sidebar_meta: Vec<SidebarWorkspaceMeta> = self
-                    .workspaces
-                    .iter()
-                    .map(|ws| {
-                        let unread_count =
-                            self.notification_store.unread_count_for_workspace(ws.id);
-                        let latest_snippet = self
-                            .notification_store
-                            .latest_unread_for_workspace(ws.id)
-                            .map(|i| i.message.clone());
-                        let active_pid = ws.active_pane_id();
-                        let status =
-                            active_pid.and_then(|pid| self.pane_status.get(&pid).copied());
-                        let tel = active_pid.and_then(|pid| self.pane_telemetry.get(&pid));
-                        SidebarWorkspaceMeta {
-                            unread_count,
-                            latest_snippet,
-                            last_output_line: tel.and_then(|t| t.last_output_line.clone()),
-                            working_elapsed_secs: tel.and_then(|t| t.working_elapsed_secs(now_instant)),
-                            git_stats: self.git_stats_poller.cached.get(&ws.id).copied(),
-                            sparkline: tel.map(|t| t.sparkline).unwrap_or_default(),
-                            status,
-                        }
-                    })
-                    .collect();
+        // 0. Full-width App Header Strip with Command Palette Search Pill (below native title bar)
+        if self.config.general.effective_show_toolbar() {
+            let header_act = egui::Panel::top("app_header_strip")
+                .show_separator_line(false)
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| {
+                    render_header_strip(ui, &self.config, &resolved_theme)
+                })
+                .inner;
+            if let Some(ToolbarAction::OpenCommandPalette) = header_act {
+                self.open_command_palette();
+            }
+        }
 
-                // 1. Sidebar on the left
-                let sidebar_action = render_sidebar(
-                    ui,
-                    SidebarProps {
-                        workspaces: &self.workspaces,
-                        active_index: self.active_workspace_index,
-                        is_collapsed: self.is_sidebar_collapsed,
-                        meta: &sidebar_meta,
-                        theme: &resolved_theme,
-                    },
-                );
+        // 0b. Bottom Status Bar (full window width when chrome visible)
+        if self.config.general.effective_show_toolbar() {
+            let active_ws = self.workspaces.get(self.active_workspace_index);
+            let branch = active_ws.and_then(|w| w.git_branch.as_deref());
+            let folder_name = active_ws
+                .and_then(|w| w.cwd.file_name().map(|f| f.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "workspace".to_string());
+            let running_agents = self
+                .pane_status
+                .values()
+                .filter(|st| st.is_working())
+                .count();
+            let sb_act = egui::Panel::bottom("status_bar")
+                .exact_size(ui_tokens::metrics::STATUS_BAR_HEIGHT)
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| {
+                    render_status_bar(
+                        ui,
+                        StatusBarProps {
+                            git_branch: branch,
+                            folder_name: &folder_name,
+                            running_agents,
+                            cpu_percent: self.system_stats.map(|s| s.cpu_percent),
+                            ram_percent: self.system_stats.map(|s| s.ram_percent),
+                            font_size: self.font_size,
+                            command_palette_shortcut: &self.config.keybindings.command_palette,
+                            resolved_theme: &resolved_theme,
+                        },
+                    )
+                })
+                .inner;
+            if let Some(StatusBarAction::OpenCommandPalette) = sb_act {
+                self.open_command_palette();
+            }
+        }
 
-                if let Some(action) = sidebar_action {
-                    match action {
-                        SidebarAction::SelectWorkspace(idx) => {
-                            self.active_workspace_index = idx;
-                        }
-                        SidebarAction::CreateWorkspace => self.open_new_workspace_modal(),
-                        SidebarAction::RenameWorkspace(idx) => {
-                            if let Some(ws) = self.workspaces.get(idx) {
-                                let current_name = ws.name.clone();
-                                self.rename_modal
-                                    .open(RenameTarget::Workspace(idx), &current_name);
-                            }
-                        }
-                        SidebarAction::CloseWorkspace(idx) => {
-                            self.close_workspace(idx);
-                        }
-                        SidebarAction::ToggleCollapse => {
-                            self.is_sidebar_collapsed = !self.is_sidebar_collapsed;
-                        }
-                        SidebarAction::OpenViewSettings => {
-                            self.settings_modal.open(&self.config);
-                        }
+        // 1. Left Workspace Sidebar (full height between header and bottom status bar)
+        let sidebar_meta: Vec<SidebarWorkspaceMeta> = self
+            .workspaces
+            .iter()
+            .map(|ws| {
+                let unread_count = self.notification_store.unread_count_for_workspace(ws.id);
+                let latest_snippet = self
+                    .notification_store
+                    .latest_unread_for_workspace(ws.id)
+                    .map(|i| i.message.clone());
+                let active_pid = ws.active_pane_id();
+                let status = active_pid.and_then(|pid| self.pane_status.get(&pid).copied());
+                let tel = active_pid.and_then(|pid| self.pane_telemetry.get(&pid));
+                SidebarWorkspaceMeta {
+                    unread_count,
+                    latest_snippet,
+                    last_output_line: tel.and_then(|t| t.last_output_line.clone()),
+                    working_elapsed_secs: tel.and_then(|t| t.working_elapsed_secs(now_instant)),
+                    git_stats: self.git_stats_poller.cached.get(&ws.id).copied(),
+                    sparkline: tel.map(|t| t.sparkline).unwrap_or_default(),
+                    status,
+                }
+            })
+            .collect();
+
+        let sidebar_props = SidebarProps {
+            workspaces: &self.workspaces,
+            active_index: self.active_workspace_index,
+            is_collapsed: self.is_sidebar_collapsed,
+            meta: &sidebar_meta,
+            theme: &resolved_theme,
+        };
+        let sidebar_action = if self.is_sidebar_collapsed {
+            egui::Panel::left("workspace_sidebar_collapsed")
+                .exact_size(52.0)
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| render_sidebar(ui, sidebar_props))
+                .inner
+        } else {
+            egui::Panel::left("workspace_sidebar_expanded")
+                .default_size(228.0)
+                .size_range(180.0..=340.0)
+                .resizable(true)
+                .show_separator_line(false)
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| render_sidebar(ui, sidebar_props))
+                .inner
+        };
+
+        if let Some(action) = sidebar_action {
+            match action {
+                SidebarAction::SelectWorkspace(idx) => {
+                    self.select_workspace(idx);
+                }
+                SidebarAction::CreateWorkspace => self.open_new_workspace_modal(),
+                SidebarAction::RenameWorkspace(idx) => {
+                    if let Some(ws) = self.workspaces.get(idx) {
+                        let current_name = ws.name.clone();
+                        self.rename_modal
+                            .open(RenameTarget::Workspace(idx), &current_name);
                     }
                 }
+                SidebarAction::CloseWorkspace(idx) => {
+                    self.close_workspace(idx);
+                }
+                SidebarAction::ToggleCollapse => {
+                    self.toggle_sidebar();
+                }
+                SidebarAction::OpenViewSettings => {
+                    self.settings_modal.open(&self.config);
+                }
+                SidebarAction::OpenShortcuts => {
+                    self.settings_modal
+                        .open_tab(&self.config, SettingsTab::Shortcuts);
+                }
+            }
+        }
 
-                // 2. Main content area (Optional Guided Toolbar + Tab Bar + Terminal Panes)
-                ui.vertical(|ui| {
-                    let total_unread: usize = self
-                        .workspaces
-                        .iter()
-                        .map(|w| self.notification_store.unread_count_for_workspace(w.id))
-                        .sum();
-                    if let Some(tb_action) = render_top_toolbar(
+        // 2. Optional Right-Side Notification & Activity Feed Drawer (rendered before CentralPanel)
+        if self.show_notifications_panel {
+            let unread = self.notification_store.unread_items();
+            let recent_feed = self.activity_feed.recent(40);
+            let drawer_act = egui::Panel::right("right_drawer")
+                .exact_size(272.0)
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| {
+                    render_right_drawer(
                         ui,
-                        &self.config,
+                        self.right_drawer_tab,
+                        &unread,
+                        &recent_feed,
                         &resolved_theme,
-                        self.is_sidebar_collapsed,
-                        total_unread,
-                    ) {
-                        match tb_action {
-                            ToolbarAction::ToggleSidebar => {
-                                self.is_sidebar_collapsed = !self.is_sidebar_collapsed;
-                            }
-                            ToolbarAction::OpenNewWorkspace => self.open_new_workspace_modal(),
-                            ToolbarAction::NewTab => self.create_new_tab(),
-                            ToolbarAction::SplitRight => {
-                                self.split_active_pane(SplitDirection::Horizontal);
-                            }
-                            ToolbarAction::SplitDown => {
-                                self.split_active_pane(SplitDirection::Vertical);
-                            }
-                            ToolbarAction::LaunchAgy => {
-                                if let Some(pane_id) = self.active_pane_id() {
-                                    self.agent_launcher_modal
-                                        .open(pane_id, self.config.general.enforce_agy_sandbox);
+                    )
+                })
+                .inner;
+            if let Some(drawer_act) = drawer_act {
+                match drawer_act {
+                    RightDrawerAction::SwitchTab(tab) => {
+                        self.right_drawer_tab = tab;
+                    }
+                    RightDrawerAction::FocusPane(ws_id, pane_id) => {
+                        if let Some(pos) = self.workspaces.iter().position(|w| w.id == ws_id) {
+                            self.active_workspace_index = pos;
+                            if let Some(ws) = self.workspaces.get_mut(pos) {
+                                if let Some(tab) = ws.active_tab_mut() {
+                                    tab.active_pane = pane_id;
                                 }
                             }
-                            ToolbarAction::OpenBrowserPane => {
-                                let _ = self.open_browser_in_pane(None, "http://localhost:3000");
-                            }
-                            ToolbarAction::OpenAcpPanel => {
-                                if let Some(pane_id) = self.active_pane_id() {
-                                    self.open_acp_in_pane(pane_id);
-                                }
-                            }
-                            ToolbarAction::LaunchTeamGrid => {
-                                self.team_launcher_modal.open();
-                            }
-                            ToolbarAction::ToggleGridView => {
-                                self.show_grid_view = !self.show_grid_view;
-                                if self.show_grid_view {
-                                    self.show_welcome_view = false;
-                                }
-                            }
-                            ToolbarAction::OpenBroadcast => {
-                                let targets = self.gather_broadcast_targets();
-                                self.broadcast_modal.open(&targets);
-                            }
-                            ToolbarAction::OpenWelcome => {
-                                self.show_welcome_view = !self.show_welcome_view;
-                                if self.show_welcome_view {
-                                    self.show_grid_view = false;
-                                }
-                            }
-                            ToolbarAction::OpenCommandPalette => self.command_palette.open(),
-                            ToolbarAction::ToggleNotifications => {
-                                self.show_notifications_panel = !self.show_notifications_panel;
-                            }
-                            ToolbarAction::OpenViewSettings => {
-                                self.settings_modal.open(&self.config);
-                            }
-                            ToolbarAction::OpenSafetySettings => {
-                                self.settings_modal
-                                    .open_tab(&self.config, SettingsTab::Safety);
-                            }
-                            ToolbarAction::SwitchUiMode(mode) => self.switch_ui_mode(mode),
+                            self.notification_store.mark_pane_read(pane_id);
+                            self.show_grid_view = false;
+                            self.show_welcome_view = false;
                         }
                     }
+                    RightDrawerAction::ClearFeed => {
+                        self.activity_feed.clear();
+                    }
+                }
+            }
+        }
 
-                    if let Some(ws) = self.workspaces.get(self.active_workspace_index) {
-                        if let Some(ToolbarAction::OpenSafetySettings) = render_workspace_folder_bar(
-                            ui,
-                            &ws.cwd,
-                            &ws.backend,
-                            self.config.general.allowed_root_dir.as_deref(),
-                            self.config.general.enforce_agy_sandbox,
-                            &resolved_theme,
-                        ) {
+        // 3. Top Chrome Panel (Toolbar + Folder Lock Bar + Tab Strip + Optional Banners)
+        let active_ws_idx = self.active_workspace_index;
+        egui::Panel::top("top_chrome")
+            .show_separator_line(false)
+            .frame(egui::Frame::new().fill(window_fill))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let total_unread: usize = self
+                    .workspaces
+                    .iter()
+                    .map(|w| self.notification_store.unread_count_for_workspace(w.id))
+                    .sum();
+                if let Some(tb_action) = render_top_toolbar(
+                    ui,
+                    &self.config,
+                    &resolved_theme,
+                    self.is_sidebar_collapsed,
+                    total_unread,
+                ) {
+                    match tb_action {
+                        ToolbarAction::ToggleSidebar => {
+                            self.toggle_sidebar();
+                        }
+                        ToolbarAction::OpenNewWorkspace => self.open_new_workspace_modal(),
+                        ToolbarAction::NewTab => self.create_new_tab(),
+                        ToolbarAction::SplitRight => {
+                            self.split_active_pane(SplitDirection::Horizontal);
+                        }
+                        ToolbarAction::SplitDown => {
+                            self.split_active_pane(SplitDirection::Vertical);
+                        }
+                        ToolbarAction::LaunchAgy => {
+                            if let Some(pane_id) = self.active_pane_id() {
+                                self.agent_launcher_modal
+                                    .open(pane_id, self.config.general.enforce_agy_sandbox);
+                            }
+                        }
+                        ToolbarAction::OpenBrowserPane => {
+                            let _ = self.open_browser_in_pane(None, "http://localhost:3000");
+                        }
+                        ToolbarAction::OpenAcpPanel => {
+                            if let Some(pane_id) = self.active_pane_id() {
+                                self.open_acp_in_pane(pane_id);
+                            }
+                        }
+                        ToolbarAction::LaunchTeamGrid => {
+                            self.team_launcher_modal.open();
+                        }
+                        ToolbarAction::ToggleGridView => {
+                            self.show_grid_view = !self.show_grid_view;
+                            if self.show_grid_view {
+                                self.show_welcome_view = false;
+                            }
+                        }
+                        ToolbarAction::OpenBroadcast => {
+                            let targets = self.gather_broadcast_targets();
+                            self.broadcast_modal.open(&targets);
+                        }
+                        ToolbarAction::OpenWelcome => {
+                            self.show_welcome_view = !self.show_welcome_view;
+                            if self.show_welcome_view {
+                                self.show_grid_view = false;
+                            }
+                        }
+                        ToolbarAction::OpenCommandPalette => self.open_command_palette(),
+                        ToolbarAction::ToggleNotifications => {
+                            self.show_notifications_panel = !self.show_notifications_panel;
+                        }
+                        ToolbarAction::OpenViewSettings => {
+                            self.settings_modal.open(&self.config);
+                        }
+                        ToolbarAction::OpenSafetySettings => {
                             self.settings_modal
                                 .open_tab(&self.config, SettingsTab::Safety);
                         }
+                        ToolbarAction::SwitchUiMode(mode) => self.switch_ui_mode(mode),
                     }
+                }
 
-                    let active_ws_idx = self.active_workspace_index;
-                    let show_hints = self.config.general.effective_show_shortcut_hints();
-                    let tab_action = if let Some(ws) = self.workspaces.get(active_ws_idx) {
-                        render_tab_bar(
-                            ui,
-                            &ws.tabs,
-                            ws.active_tab_index,
-                            show_hints,
-                            &resolved_theme,
-                        )
-                    } else {
-                        None
-                    };
+                if let Some(ws) = self.workspaces.get(self.active_workspace_index) {
+                    if let Some(ToolbarAction::OpenSafetySettings) = render_workspace_folder_bar(
+                        ui,
+                        &ws.cwd,
+                        &ws.backend,
+                        self.config.general.allowed_root_dir.as_deref(),
+                        self.config.general.enforce_agy_sandbox,
+                        &resolved_theme,
+                    ) {
+                        self.settings_modal
+                            .open_tab(&self.config, SettingsTab::Safety);
+                    }
+                }
 
-                    if let Some(action) = tab_action {
-                        match action {
-                            TabBarAction::Select(idx) => {
+                let show_hints = self.config.general.effective_show_shortcut_hints();
+                let tab_action = if let Some(ws) = self.workspaces.get(active_ws_idx) {
+                    let tab_statuses: Vec<AgentStatus> = ws
+                        .tabs
+                        .iter()
+                        .map(|t| aggregate_tab_status(t, &self.pane_status))
+                        .collect();
+                    render_tab_bar(
+                        ui,
+                        &ws.tabs,
+                        &tab_statuses,
+                        ws.active_tab_index,
+                        show_hints,
+                        &resolved_theme,
+                    )
+                } else {
+                    None
+                };
+
+                if let Some(action) = tab_action {
+                    match action {
+                        TabBarAction::Select(idx) => {
+                            if let Some(ws) = self.workspaces.get_mut(active_ws_idx) {
+                                ws.active_tab_index = idx;
+                            }
+                            self.save_session();
+                        }
+                        TabBarAction::Create => self.create_new_tab(),
+                        TabBarAction::Rename(tab_index) => {
+                            if let Some(ws) = self.workspaces.get(active_ws_idx) {
+                                if let Some(tab) = ws.tabs.get(tab_index) {
+                                    let current = tab.title.clone();
+                                    self.rename_modal.open(
+                                        RenameTarget::Tab {
+                                            ws_index: active_ws_idx,
+                                            tab_index,
+                                        },
+                                        &current,
+                                    );
+                                }
+                            }
+                        }
+                        TabBarAction::Close(idx) => {
+                            let closed_panes =
                                 if let Some(ws) = self.workspaces.get_mut(active_ws_idx) {
-                                    ws.active_tab_index = idx;
-                                }
-                            }
-                            TabBarAction::Create => self.create_new_tab(),
-                            TabBarAction::Rename(tab_index) => {
-                                if let Some(ws) = self.workspaces.get(active_ws_idx) {
-                                    if let Some(tab) = ws.tabs.get(tab_index) {
-                                        let current = tab.title.clone();
-                                        self.rename_modal.open(
-                                            RenameTarget::Tab {
-                                                ws_index: active_ws_idx,
-                                                tab_index,
-                                            },
-                                            &current,
-                                        );
-                                    }
-                                }
-                            }
-                            TabBarAction::Close(idx) => {
-                                let closed_panes = if let Some(ws) = self.workspaces.get_mut(active_ws_idx) {
                                     if ws.tabs.len() > 1 {
                                         let closed_tab = ws.tabs.remove(idx);
                                         if ws.active_tab_index >= ws.tabs.len() {
@@ -2390,72 +2641,76 @@ impl eframe::App for AgeMaxApp {
                                 } else {
                                     None
                                 };
-                                if let Some(panes) = closed_panes {
-                                    for p in panes {
-                                        self.remove_pane_resources(p);
-                                    }
-                                    self.save_session();
+                            if let Some(panes) = closed_panes {
+                                for p in panes {
+                                    self.remove_pane_resources(p);
                                 }
+                                self.save_session();
                             }
                         }
                     }
+                }
 
-                    // Optional first-run agy.exe onboarding setup banner (REQ-075)
-                    if let Some(onb) =
-                        render_onboarding_banner(ui, &mut self.preflight, &self.config)
-                    {
-                        match onb {
-                            OnboardingAction::Recheck => {
-                                self.preflight.trigger_check(
-                                    self.config.general.default_shell.clone(),
-                                    Some(ui.ctx().clone()),
-                                );
-                            }
-                            OnboardingAction::HideForever => {
-                                self.config.general.enable_onboarding_banner = false;
-                                let _ = self.config.save_default();
-                            }
-                            OnboardingAction::Dismiss => {
-                                self.preflight.session_dismissed = true;
-                            }
+                // Optional first-run agy.exe onboarding setup banner (REQ-075)
+                if let Some(onb) = render_onboarding_banner(ui, &mut self.preflight, &self.config) {
+                    match onb {
+                        OnboardingAction::Recheck => {
+                            self.preflight.trigger_check(
+                                self.config.general.default_shell.clone(),
+                                Some(ui.ctx().clone()),
+                            );
+                        }
+                        OnboardingAction::HideForever => {
+                            self.config.general.enable_onboarding_banner = false;
+                            let _ = self.config.save_default();
+                        }
+                        OnboardingAction::Dismiss => {
+                            self.preflight.session_dismissed = true;
                         }
                     }
+                }
 
-                    // Optional non-blocking startup session restore prompt
-                    let mut restore_decision = None;
-                    if let Some(ref snap) = self.pending_restore {
-                        restore_decision =
-                            render_session_restore_banner(ui, snap, &resolved_theme);
-                    }
-                    if let Some(decision) = restore_decision {
-                        match decision {
-                            SessionRestoreAction::RestoreWorkspacesOnly => {
-                                if let Some(snap) = self.pending_restore.take() {
-                                    self.restore_session_snapshot(snap, false);
-                                }
-                            }
-                            SessionRestoreAction::RestoreAndResumeAgents => {
-                                if let Some(snap) = self.pending_restore.take() {
-                                    self.restore_session_snapshot(snap, true);
-                                }
-                            }
-                            SessionRestoreAction::Dismiss => {
-                                self.pending_restore = None;
+                // Optional non-blocking startup session restore prompt
+                let mut restore_decision = None;
+                if let Some(ref snap) = self.pending_restore {
+                    restore_decision = render_session_restore_banner(ui, snap, &resolved_theme);
+                }
+                if let Some(decision) = restore_decision {
+                    match decision {
+                        SessionRestoreAction::RestoreWorkspacesOnly => {
+                            if let Some(snap) = self.pending_restore.take() {
+                                self.restore_session_snapshot(snap, false);
                             }
                         }
+                        SessionRestoreAction::RestoreAndResumeAgents => {
+                            if let Some(snap) = self.pending_restore.take() {
+                                self.restore_session_snapshot(snap, true);
+                            }
+                        }
+                        SessionRestoreAction::Dismiss => {
+                            self.pending_restore = None;
+                        }
                     }
+                }
+            });
 
-                    // Calculate content area rectangle
-                    let content_size = ui.available_size();
-                    let content_min = ui.cursor().min;
-                    let content_rect = CoreRect::from_min_size(
-                        Point::new(content_min.x, content_min.y),
-                        content_size.x,
-                        content_size.y,
-                    );
+        // 4. Main Central Viewport (Welcome / Agents Grid / Split Terminal & ACP & WebView Canvas)
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(window_fill)
+                    .inner_margin(egui::Margin::same(4)),
+            )
+            .show(ui, |ui| {
+                let avail_rect = ui.available_rect_before_wrap();
+                let content_rect = CoreRect::from_min_size(
+                    Point::new(avail_rect.min.x, avail_rect.min.y),
+                    avail_rect.width(),
+                    avail_rect.height(),
+                );
 
-                    // Handle keyboard input routed to focused pane
-                    self.handle_input(ui.ctx(), content_rect);
+                // Handle keyboard input routed to focused pane
+                self.handle_input(ui.ctx(), content_rect);
 
                     // Handle global Ctrl+Wheel font zoom + hover mouse wheel scrollback / drag splitters
                     let raw_scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
@@ -2614,7 +2869,8 @@ impl eframe::App for AgeMaxApp {
                             }
                         }
                     } else {
-                        if !self.is_modal_open() && !self.context_menu.is_open && raw_scroll_y.abs() > 0.1
+                        ui.allocate_rect(avail_rect, egui::Sense::hover());
+                        if !self.is_overlay_active(ui.ctx()) && raw_scroll_y.abs() > 0.1
                         {
                         if mods_now.ctrl {
                             let step = if raw_scroll_y > 0.0 { 1.0 } else { -1.0 };
@@ -2658,7 +2914,7 @@ impl eframe::App for AgeMaxApp {
 
                     // Handle interactive split divider drag-to-resize (REQ-071)
                     let mut divider_dragging_or_hovered = false;
-                    if !self.is_modal_open() && !self.context_menu.is_open {
+                    if !self.is_overlay_active(ui.ctx()) {
                         if let Some(drag) = self.active_split_drag.clone() {
                             divider_dragging_or_hovered = true;
                             ui.ctx().set_cursor_icon(match drag.direction {
@@ -2693,6 +2949,13 @@ impl eframe::App for AgeMaxApp {
                                 if let Some(tab) = ws.active_tab() {
                                     if tab.zoomed_pane.is_none() {
                                         for div in tab.layout.split_dividers(content_rect) {
+                                            ui.painter().line_segment(
+                                                [
+                                                    Pos2::new(div.min.x, div.min.y),
+                                                    Pos2::new(div.max.x, div.max.y),
+                                                ],
+                                                Stroke::new(1.0, tokens.border_subtle),
+                                            );
                                             let hit_rect = match div.direction {
                                                 SplitDirection::Horizontal => Rect::from_min_max(
                                                     Pos2::new(div.min.x - 4.0, div.min.y),
@@ -2753,7 +3016,7 @@ impl eframe::App for AgeMaxApp {
                     // 3. Render panes inside the tab layout
                     let show_pane_headers = self.config.general.effective_show_pane_headers();
                     let show_hints = self.config.general.effective_show_shortcut_hints();
-                    let modal_or_menu_open = self.is_modal_open() || self.context_menu.is_open;
+                    let modal_or_menu_open = self.is_overlay_active(ui.ctx());
                     let host_hwnd = self.host_hwnd;
                     let pane_bg_color = if mica_active && self.config.general.enable_mica_backdrop {
                         Color32::from_rgba_unmultiplied(bg_rgb.0, bg_rgb.1, bg_rgb.2, 218)
@@ -2771,6 +3034,7 @@ impl eframe::App for AgeMaxApp {
                         if let Some(tab) = ws.active_tab() {
                             let focused_pane = tab.active_pane;
                             let is_zoomed = tab.zoomed_pane.is_some();
+                            let pane_order = tab.layout.panes();
                             let pane_rects = if let Some(zoomed) = tab.zoomed_pane {
                                 let mut m = HashMap::new();
                                 m.insert(zoomed, content_rect);
@@ -2778,6 +3042,7 @@ impl eframe::App for AgeMaxApp {
                             } else {
                                 tab.layout.compute_rects(content_rect)
                             };
+                            let pane_gutter = if pane_rects.len() > 1 { 2.5 } else { 0.0 };
 
                             let font_id = FontId::monospace(self.font_size);
                             let sample = ui.painter().layout_no_wrap(
@@ -2793,7 +3058,8 @@ impl eframe::App for AgeMaxApp {
                                 let target_egui_rect = Rect::from_min_size(
                                     Pos2::new(rect.min.x, rect.min.y),
                                     Vec2::new(rect.width(), rect.height()),
-                                );
+                                )
+                                .shrink(pane_gutter);
                                 let rect_anim = self.rect_animator.step(
                                     pane_id,
                                     target_egui_rect,
@@ -2804,7 +3070,11 @@ impl eframe::App for AgeMaxApp {
                                 let egui_rect = rect_anim.visual_rect;
 
                                 // Pane background and smooth state-colored attention glow (`REQ-084`)
-                                ui.painter().rect_filled(egui_rect, 2.0, pane_bg_color);
+                                ui.painter().rect_filled(
+                                    egui_rect,
+                                    ui_tokens::metrics::RADIUS_SM,
+                                    pane_bg_color,
+                                );
                                 let pane_status = self
                                     .pane_status
                                     .get(&pane_id)
@@ -2829,7 +3099,7 @@ impl eframe::App for AgeMaxApp {
                                 if let Some(glow_col) = border_visual.outer_glow_color {
                                     ui.painter().rect_stroke(
                                         egui_rect.shrink(1.0),
-                                        3.0,
+                                        ui_tokens::metrics::RADIUS_SM,
                                         Stroke::new(border_visual.outer_glow_width, glow_col),
                                         StrokeKind::Inside,
                                     );
@@ -2837,9 +3107,13 @@ impl eframe::App for AgeMaxApp {
 
                                 ui.painter().rect_stroke(
                                     egui_rect,
-                                    2.0,
+                                    ui_tokens::metrics::RADIUS_SM,
                                     Stroke::new(
-                                        border_visual.border_width,
+                                        if is_focused {
+                                            border_visual.border_width.max(1.6)
+                                        } else {
+                                            border_visual.border_width
+                                        },
                                         border_visual.border_color,
                                     ),
                                     StrokeKind::Inside,
@@ -2848,14 +3122,14 @@ impl eframe::App for AgeMaxApp {
                                 if let Some(focus_col) = border_visual.focus_inner_color {
                                     ui.painter().rect_stroke(
                                         egui_rect.shrink(2.0),
-                                        1.5,
+                                        4.0,
                                         Stroke::new(1.0, focus_col),
                                         StrokeKind::Inside,
                                     );
                                 }
 
-                                // Optional Guided mode slim 26px per-pane header bar
-                                let header_h = if show_pane_headers { 26.0 } else { 0.0 };
+                                // Optional Guided mode slim 28px per-pane header bar
+                                let header_h = if show_pane_headers { 28.0 } else { 0.0 };
                                 if show_pane_headers && egui_rect.height() > header_h + 40.0 {
                                     let header_rect = Rect::from_min_max(
                                         egui_rect.min,
@@ -2864,11 +3138,18 @@ impl eframe::App for AgeMaxApp {
                                     let team_role_prop = team_meta
                                         .as_ref()
                                         .map(|m| (m.role_name.as_str(), m.is_coordinator));
+                                    let pane_idx = pane_order
+                                        .iter()
+                                        .position(|&id| id == pane_id)
+                                        .map(|i| i + 1)
+                                        .unwrap_or(1);
+                                    let pane_label = format!("agy-{pane_idx}");
                                     if let Some(act) = render_pane_header(
                                         ui,
                                         PaneHeaderProps {
                                             header_rect,
                                             pane_id,
+                                            pane_label: &pane_label,
                                             status: pane_status,
                                             is_focused,
                                             is_zoomed,
@@ -2890,12 +3171,14 @@ impl eframe::App for AgeMaxApp {
                                     Pos2::new(egui_rect.min.x, term_top),
                                     egui_rect.max,
                                 );
-                                let target_w = (target_egui_rect.width() - (pad * 2.0)).max(50.0);
-                                let target_h =
-                                    ((target_egui_rect.height() - header_h).max(40.0) - (pad * 2.0))
-                                        .max(32.0);
-                                let cols = (target_w / self.char_width).floor() as u16;
-                                let rows = (target_h / self.char_height).floor() as u16;
+                                let term_size = compute_terminal_grid_size(
+                                    target_egui_rect.width(),
+                                    target_egui_rect.height(),
+                                    header_h,
+                                    pad,
+                                    self.char_width,
+                                    self.char_height,
+                                );
                                 let origin = Pos2::new(egui_rect.min.x + pad, term_top + pad);
 
                                 // Handle mouse focus and right-click menu trigger
@@ -2955,8 +3238,7 @@ impl eframe::App for AgeMaxApp {
 
                                 if let Some(surface) = self.surfaces.get_mut(&pane_id) {
                                     if rect_anim.allow_backend_resize {
-                                        let new_size = TerminalSize::new(cols, rows);
-                                        let _ = surface.resize(new_size);
+                                        let _ = surface.resize(term_size);
                                     }
 
                                     let cur_rows = surface.rows();
@@ -3059,6 +3341,9 @@ impl eframe::App for AgeMaxApp {
 
                                     for r in 0..cur_rows {
                                         let y = origin.y + (r as f32 * self.char_height);
+                                        if y >= term_rect.max.y {
+                                            break;
+                                        }
                                         let abs_line = surface.viewport_to_grid_line(r);
                                         let mut span_text = String::new();
                                         let mut span_start_c = 0;
@@ -3192,9 +3477,9 @@ impl eframe::App for AgeMaxApp {
                                                 .max_rect(pill_rect),
                                             |ui| {
                                                 if ui
-                                                    .small_button(format!(
-                                                        "↓ Latest (+{})",
-                                                        scroll_offset
+                                                    .small_button(icons::icon_small(
+                                                        icons::UiIcon::ArrowDown,
+                                                        &format!("Latest (+{})", scroll_offset),
                                                     ))
                                                     .clicked()
                                                 {
@@ -3264,6 +3549,15 @@ impl eframe::App for AgeMaxApp {
 
                     if let Some(pid) = clicked_focus_pane {
                         self.focus_pane_in_active_tab(pid);
+                        if !self.webview_panes.contains_key(&pid)
+                            && !self.acp_panes.contains_key(&pid)
+                        {
+                            ui.ctx().memory_mut(|m| {
+                                if let Some(focused_widget) = m.focused() {
+                                    m.surrender_focus(focused_widget);
+                                }
+                            });
+                        }
                     }
 
                     if let Some(exit_action) = pending_exit_action {
@@ -3305,162 +3599,157 @@ impl eframe::App for AgeMaxApp {
                             }
                         }
                     }
-                });
-
-                // 3. Optional Right-Side Notification & Activity Feed Drawer (Ctrl+Shift+N)
-                if self.show_notifications_panel {
-                    let unread = self.notification_store.unread_items();
-                    let recent_feed = self.activity_feed.recent(40);
-                    if let Some(drawer_act) = render_right_drawer(
-                        ui,
-                        self.right_drawer_tab,
-                        &unread,
-                        &recent_feed,
-                        &resolved_theme,
-                    ) {
-                        match drawer_act {
-                            RightDrawerAction::SwitchTab(tab) => {
-                                self.right_drawer_tab = tab;
-                            }
-                            RightDrawerAction::FocusPane(ws_id, pane_id) => {
-                                if let Some(pos) =
-                                    self.workspaces.iter().position(|w| w.id == ws_id)
-                                {
-                                    self.active_workspace_index = pos;
-                                    if let Some(ws) = self.workspaces.get_mut(pos) {
-                                        if let Some(tab) = ws.active_tab_mut() {
-                                            tab.active_pane = pane_id;
-                                        }
-                                    }
-                                    self.notification_store.mark_pane_read(pane_id);
-                                    self.show_grid_view = false;
-                                    self.show_welcome_view = false;
-                                }
-                            }
-                            RightDrawerAction::ClearFeed => {
-                                self.activity_feed.clear();
-                            }
-                        }
-                    }
-                }
-
-                // 4. Command Palette (Ctrl+Shift+P)
-                if let Some(action) = self.command_palette.show(ui.ctx()) {
-                    self.execute_palette_action(action);
-                }
-
-                // 5. New Workspace Modal (Local / WSL / SSH Backend)
-                if let Some(ws_req) = self
-                    .new_workspace_modal
-                    .show(ui.ctx(), self.config.general.allowed_root_dir.as_deref())
-                {
-                    let _ = self.create_workspace_with_backend(ws_req);
-                }
-
-                // 6. Rename Workspace / Tab Modal
-                if let Some((target, new_name)) = self.rename_modal.show(ui.ctx()) {
-                    match target {
-                        RenameTarget::Workspace(idx) => {
-                            if let Some(ws) = self.workspaces.get_mut(idx) {
-                                if ws.rename(new_name) {
-                                    self.save_session();
-                                }
-                            }
-                        }
-                        RenameTarget::Tab {
-                            ws_index,
-                            tab_index,
-                        } => {
-                            if let Some(ws) = self.workspaces.get_mut(ws_index) {
-                                if let Some(tab) = ws.tabs.get_mut(tab_index) {
-                                    if tab.rename(new_name) {
-                                        self.save_session();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 7. Comprehensive Visual Settings Modal (Appearance / Terminal & Alerts / Shortcuts / Quick Actions)
-                if self
-                    .settings_modal
-                    .show(ui.ctx(), &mut self.config, &mut self.preflight)
-                {
-                    self.font_size = self.config.general.font_size.clamp(9.0, 32.0);
-                    self.command_palette.sync_builtins(&self.config.keybindings);
-                    self.command_palette
-                        .set_custom_commands(&self.config.commands);
-                    let _ = self.config.save_default();
-                }
-
-                // 7b. Plain-English Visual Agent Preset Launcher (REQ-076, REQ-080, REQ-082)
-                let active_cwd = self
-                    .active_workspace()
-                    .map(|w| w.cwd.clone())
-                    .unwrap_or_else(|| PathBuf::from("."));
-                if let Some(req) = self.agent_launcher_modal.show(
-                    ui.ctx(),
-                    &mut self.preflight,
-                    &active_cwd,
-                    self.config.general.allowed_root_dir.as_deref(),
-                ) {
-                    self.launch_agent_request(req);
-                }
-
-                // 7c. Multi-Agent Team Grid Launcher (Unit 7 §C)
-                if let Some(team_req) = self.team_launcher_modal.show(ui.ctx()) {
-                    self.launch_team_grid(team_req);
-                }
-
-                // 7d. Safe Multi-Session Prompt Broadcast Modal (REQ-088)
-                if self.broadcast_modal.is_open {
-                    let targets = self.gather_broadcast_targets();
-                    if let Some(b_req) = self.broadcast_modal.show(ui.ctx(), &targets) {
-                        self.execute_broadcast(b_req);
-                    }
-                }
-
-                // 8. Right-Click Context Menu overlay (Copy / Paste / Clear / Split)
-                let has_selection = self
-                    .text_selection
-                    .map(|s| s.is_non_empty() && Some(s.pane_id) == self.context_menu.pane_id)
-                    .unwrap_or(false);
-                if let Some(ctx_action) =
-                    render_context_menu(ui.ctx(), &mut self.context_menu, has_selection)
-                {
-                    match ctx_action {
-                        ContextMenuAction::Copy(pid) => {
-                            self.copy_selection_to_clipboard(ui.ctx(), Some(pid));
-                        }
-                        ContextMenuAction::Paste(pid) => {
-                            self.focus_pane_in_active_tab(pid);
-                            ui.ctx()
-                                .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
-                        }
-                        ContextMenuAction::Clear(pid) => {
-                            if let Some(surface) = self.surfaces.get_mut(&pid) {
-                                surface.clear_screen();
-                            }
-                            self.text_selection = None;
-                        }
-                        ContextMenuAction::SplitRight(pid) => {
-                            self.focus_pane_in_active_tab(pid);
-                            self.split_active_pane(SplitDirection::Horizontal);
-                        }
-                        ContextMenuAction::SplitDown(pid) => {
-                            self.focus_pane_in_active_tab(pid);
-                            self.split_active_pane(SplitDirection::Vertical);
-                        }
-                        ContextMenuAction::LaunchAgy(pid) => self
-                            .agent_launcher_modal
-                            .open(pid, self.config.general.enforce_agy_sandbox),
-                    }
-                }
             });
-        });
+
+        // 5. Floating Modals & Context Menu Overlays (render over all panels)
+        if let Some(action) = self.command_palette.show(ui.ctx(), &resolved_theme) {
+            self.execute_palette_action(action);
+        }
+
+        // 5. New Workspace Modal (Local / WSL / SSH Backend)
+        if let Some(ws_req) = self
+            .new_workspace_modal
+            .show(ui.ctx(), self.config.general.allowed_root_dir.as_deref())
+        {
+            let _ = self.create_workspace_with_backend(ws_req);
+        }
+
+        // 6. Rename Workspace / Tab Modal
+        if let Some((target, new_name)) = self.rename_modal.show(ui.ctx()) {
+            match target {
+                RenameTarget::Workspace(idx) => {
+                    if let Some(ws) = self.workspaces.get_mut(idx) {
+                        if ws.rename(new_name) {
+                            self.save_session();
+                        }
+                    }
+                }
+                RenameTarget::Tab {
+                    ws_index,
+                    tab_index,
+                } => {
+                    if let Some(ws) = self.workspaces.get_mut(ws_index) {
+                        if let Some(tab) = ws.tabs.get_mut(tab_index) {
+                            if tab.rename(new_name) {
+                                self.save_session();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 7. Comprehensive Visual Settings Modal (Appearance / Terminal & Alerts / Shortcuts / Quick Actions)
+        if self
+            .settings_modal
+            .show(ui.ctx(), &mut self.config, &mut self.preflight)
+        {
+            self.font_size = self.config.general.font_size.clamp(9.0, 32.0);
+            self.command_palette.sync_builtins(&self.config.keybindings);
+            self.command_palette
+                .set_custom_commands(&self.config.commands);
+            let _ = self.config.save_default();
+        }
+
+        // 7b. Plain-English Visual Agent Preset Launcher (REQ-076, REQ-080, REQ-082)
+        let active_cwd = self
+            .active_workspace()
+            .map(|w| w.cwd.clone())
+            .unwrap_or_else(|| PathBuf::from("."));
+        if let Some(req) = self.agent_launcher_modal.show(
+            ui.ctx(),
+            &mut self.preflight,
+            &active_cwd,
+            self.config.general.allowed_root_dir.as_deref(),
+        ) {
+            self.launch_agent_request(req);
+        }
+
+        // 7c. Multi-Agent Team Grid Launcher (Unit 7 §C)
+        if let Some(team_req) = self.team_launcher_modal.show(ui.ctx()) {
+            self.launch_team_grid(team_req);
+        }
+
+        // 7d. Safe Multi-Session Prompt Broadcast Modal (REQ-088)
+        if self.broadcast_modal.is_open {
+            let targets = self.gather_broadcast_targets();
+            if let Some(b_req) = self.broadcast_modal.show(ui.ctx(), &targets) {
+                self.execute_broadcast(b_req);
+            }
+        }
+
+        // 8. Right-Click Context Menu overlay (Copy / Paste / Clear / Split)
+        let has_selection = self
+            .text_selection
+            .map(|s| s.is_non_empty() && Some(s.pane_id) == self.context_menu.pane_id)
+            .unwrap_or(false);
+        if let Some(ctx_action) =
+            render_context_menu(ui.ctx(), &mut self.context_menu, has_selection)
+        {
+            match ctx_action {
+                ContextMenuAction::Copy(pid) => {
+                    self.copy_selection_to_clipboard(ui.ctx(), Some(pid));
+                }
+                ContextMenuAction::Paste(pid) => {
+                    self.focus_pane_in_active_tab(pid);
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                }
+                ContextMenuAction::Clear(pid) => {
+                    if let Some(surface) = self.surfaces.get_mut(&pid) {
+                        surface.clear_screen();
+                    }
+                    self.text_selection = None;
+                }
+                ContextMenuAction::SplitRight(pid) => {
+                    self.focus_pane_in_active_tab(pid);
+                    self.split_active_pane(SplitDirection::Horizontal);
+                }
+                ContextMenuAction::SplitDown(pid) => {
+                    self.focus_pane_in_active_tab(pid);
+                    self.split_active_pane(SplitDirection::Vertical);
+                }
+                ContextMenuAction::LaunchAgy(pid) => self
+                    .agent_launcher_modal
+                    .open(pid, self.config.general.enforce_agy_sandbox),
+            }
+        }
         self.any_pane_animating = any_animating;
     }
+}
+
+fn aggregate_tab_status(tab: &Tab, pane_status: &HashMap<PaneId, AgentStatus>) -> AgentStatus {
+    let mut best = AgentStatus::Idle;
+    for pid in tab.layout.panes() {
+        let st = pane_status.get(&pid).copied().unwrap_or(AgentStatus::Idle);
+        match st {
+            AgentStatus::WaitingForInput => return AgentStatus::WaitingForInput,
+            AgentStatus::Failed => best = AgentStatus::Failed,
+            AgentStatus::Working | AgentStatus::Thinking | AgentStatus::RunningTool
+                if best != AgentStatus::Failed =>
+            {
+                best = st;
+            }
+            AgentStatus::Done if best == AgentStatus::Idle => best = AgentStatus::Done,
+            _ => {}
+        }
+    }
+    best
+}
+
+fn compute_terminal_grid_size(
+    pane_width: f32,
+    pane_height: f32,
+    header_height: f32,
+    pad: f32,
+    char_width: f32,
+    char_height: f32,
+) -> TerminalSize {
+    let target_w = (pane_width - (pad * 2.0)).max(50.0);
+    let target_h = ((pane_height - header_height).max(40.0) - (pad * 2.0)).max(32.0);
+    let cols = (target_w / char_width.max(1.0)).floor().clamp(2.0, 500.0) as u16;
+    let rows = (target_h / char_height.max(1.0)).floor().clamp(2.0, 200.0) as u16;
+    TerminalSize::new(cols, rows)
 }
 
 fn paths_match(a: &Path, b: &Path) -> bool {
@@ -3526,5 +3815,20 @@ fn egui_key_to_code(key: Key) -> Option<KeyCode> {
         Key::ArrowLeft => Some(KeyCode::ArrowLeft),
         Key::ArrowRight => Some(KeyCode::ArrowRight),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_terminal_grid_size;
+
+    #[test]
+    fn test_compute_terminal_grid_size_scales_with_viewport() {
+        let small = compute_terminal_grid_size(900.0, 560.0, 26.0, 4.0, 8.4, 18.0);
+        let large = compute_terminal_grid_size(1680.0, 940.0, 26.0, 4.0, 8.4, 18.0);
+        assert!(large.cols > small.cols);
+        assert!(large.rows > small.rows);
+        assert!(small.cols >= 100);
+        assert!(small.rows >= 28);
     }
 }

@@ -1,3 +1,4 @@
+use crate::icons::{icon_small, icon_text, UiIcon};
 use agemax_config::theme::ResolvedTheme;
 use agemax_core::layout::{PaneId, SplitDirection};
 use agemax_core::session::SessionSnapshot;
@@ -216,13 +217,23 @@ pub fn render_pane_exit_banner(
                         .color(Color32::from_rgb(245, 190, 110))
                         .strong(),
                 );
-                if ui.small_button("↻ Restart Shell").clicked() {
+                if ui
+                    .small_button(icon_small(UiIcon::RotateCw, "Restart Shell"))
+                    .clicked()
+                {
                     action = Some(ExitBannerAction::RestartShell(pane_id));
                 }
-                if has_conversation && ui.small_button("▶ Resume Agent").clicked() {
+                if has_conversation
+                    && ui
+                        .small_button(icon_small(UiIcon::Play, "Resume Agent"))
+                        .clicked()
+                {
                     action = Some(ExitBannerAction::ResumeAgent(pane_id));
                 }
-                if ui.small_button("× Close Pane").clicked() {
+                if ui
+                    .small_button(icon_small(UiIcon::X, "Close Pane"))
+                    .clicked()
+                {
                     action = Some(ExitBannerAction::ClosePane(pane_id));
                 }
             });
@@ -286,7 +297,10 @@ pub fn render_context_menu(
                         emitted = Some(ContextMenuAction::SplitDown(pane_id));
                         close = true;
                     }
-                    if ui.button("▶ Start Agent (agy)").clicked() {
+                    if ui
+                        .button(icon_text(UiIcon::Play, "Start Agent (agy)"))
+                        .clicked()
+                    {
                         emitted = Some(ContextMenuAction::LaunchAgy(pane_id));
                         close = true;
                     }
