@@ -90,12 +90,12 @@ impl ThemeConfig {
             ThemePreset::MidnightDark => Self {
                 background: "#0F1117".to_string(),
                 foreground: "#DCE0E8".to_string(),
-                cursor: "#E6EBF5".to_string(),
-                active_border: "#466EC8".to_string(),
-                inactive_border: "#20232D".to_string(),
-                ring_waiting: "#F5AF2D".to_string(),
-                ring_done: "#2DC86E".to_string(),
-                ring_failed: "#EB3C3C".to_string(),
+                cursor: "#A78BFA".to_string(),
+                active_border: "#8B5CF6".to_string(),
+                inactive_border: "#26283B".to_string(),
+                ring_waiting: "#F59E0B".to_string(),
+                ring_done: "#22C55E".to_string(),
+                ring_failed: "#EF4444".to_string(),
             },
             ThemePreset::HighContrast => Self {
                 background: "#080A0E".to_string(),

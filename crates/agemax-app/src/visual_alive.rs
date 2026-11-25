@@ -24,39 +24,17 @@ pub struct ThemeChromeColors {
 }
 
 impl ThemeChromeColors {
-    /// Derive harmonizing UI surface tones from any resolved palette preset.
+    /// Derive harmonizing UI surface tones from `UiTokens` for any preset.
     pub fn from_theme(theme: &ResolvedTheme) -> Self {
-        let bg = theme.background;
-        let fg = theme.foreground;
-        let accent = theme.active_border;
-        let is_light = theme.is_light_background();
-        let shift = |base: (u8, u8, u8), delta: i16| -> Color32 {
-            let adj = |v: u8| -> u8 {
-                if is_light {
-                    (v as i16 - delta).clamp(0, 255) as u8
-                } else {
-                    (v as i16 + delta).clamp(0, 255) as u8
-                }
-            };
-            Color32::from_rgb(adj(base.0), adj(base.1), adj(base.2))
-        };
-
+        let t = crate::ui_tokens::UiTokens::from_theme(theme);
         Self {
-            window_bg: Color32::from_rgb(bg.0, bg.1, bg.2),
-            panel_bg: shift(bg, 7),
-            panel_alt_bg: shift(bg, 14),
-            panel_stroke: Color32::from_rgb(
-                theme.inactive_border.0,
-                theme.inactive_border.1,
-                theme.inactive_border.2,
-            ),
-            text_primary: Color32::from_rgb(fg.0, fg.1, fg.2),
-            text_muted: Color32::from_rgb(
-                ((fg.0 as u16 + bg.0 as u16) / 2) as u8,
-                ((fg.1 as u16 + bg.1 as u16) / 2) as u8,
-                ((fg.2 as u16 + bg.2 as u16) / 2) as u8,
-            ),
-            accent: Color32::from_rgb(accent.0, accent.1, accent.2),
+            window_bg: t.bg_canvas,
+            panel_bg: t.bg_chrome,
+            panel_alt_bg: t.bg_surface,
+            panel_stroke: t.border_subtle,
+            text_primary: t.text_primary,
+            text_muted: t.text_muted,
+            accent: t.border_focus,
         }
     }
 }

@@ -15,6 +15,7 @@ mod sidebar;
 mod stretch_panels;
 mod tab_bar;
 mod telemetry;
+mod ui_tokens;
 mod visual_alive;
 mod webview_pane;
 
@@ -206,7 +207,7 @@ pub struct AgeMaxApp {
     text_selection: Option<TextSelection>,
     active_split_drag: Option<ActiveSplitDrag>,
     context_menu: ContextMenuState,
-    last_light_visuals: Option<bool>,
+    last_theme: Option<agemax_config::theme::ResolvedTheme>,
     visual_animator: PaneVisualAnimator,
     rect_animator: PaneRectAnimator,
     backdrop_ctrl: BackdropController,
@@ -346,7 +347,7 @@ impl AgeMaxApp {
             text_selection: None,
             active_split_drag: None,
             context_menu: ContextMenuState::default(),
-            last_light_visuals: None,
+            last_theme: None,
             visual_animator: PaneVisualAnimator::new(),
             rect_animator: PaneRectAnimator::new(),
             backdrop_ctrl: BackdropController::default(),
@@ -2232,14 +2233,10 @@ impl eframe::App for AgeMaxApp {
         let _ = frame;
 
         let resolved_theme = self.config.theme.resolved_rgb();
-        let is_light = resolved_theme.is_light_background();
-        if self.last_light_visuals != Some(is_light) {
-            ui.ctx().set_visuals(if is_light {
-                egui::Visuals::light()
-            } else {
-                egui::Visuals::dark()
-            });
-            self.last_light_visuals = Some(is_light);
+        let tokens = ui_tokens::UiTokens::from_theme(&resolved_theme);
+        if self.last_theme != Some(resolved_theme) {
+            tokens.apply_visuals(ui.ctx());
+            self.last_theme = Some(resolved_theme);
         }
 
         let mica_active = self
@@ -3568,9 +3565,7 @@ fn compute_terminal_grid_size(
     let target_w = (pane_width - (pad * 2.0)).max(50.0);
     let target_h = ((pane_height - header_height).max(40.0) - (pad * 2.0)).max(32.0);
     let cols = (target_w / char_width.max(1.0)).floor().clamp(2.0, 500.0) as u16;
-    let rows = (target_h / char_height.max(1.0))
-        .floor()
-        .clamp(2.0, 200.0) as u16;
+    let rows = (target_h / char_height.max(1.0)).floor().clamp(2.0, 200.0) as u16;
     TerminalSize::new(cols, rows)
 }
 
