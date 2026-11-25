@@ -1,4 +1,5 @@
 use crate::folder_picker::spawn_folder_picker_async;
+use crate::icons::{icon_label, icon_rich, icon_small, icon_text, status_icon, UiIcon};
 use crate::visual_alive::{render_agent_mascot, ThemeChromeColors};
 pub use agemax_config::keybindings::KeybindingsConfig;
 use agemax_config::safety::{display_clean_path, validate_workspace_path};
@@ -209,22 +210,34 @@ impl NewWorkspaceModal {
                     );
                     if let Some(root) = allowed_root {
                         ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "🔒 Folder Lock Active — local workspaces must stay inside: {}",
+                        ui.label(icon_label(
+                            UiIcon::Lock,
+                            &format!(
+                                "Folder Lock Active — local workspaces must stay inside: {}",
                                 display_clean_path(root)
-                            ))
-                            .size(11.0)
-                            .color(Color32::from_rgb(125, 225, 165))
-                            .strong(),
-                        );
+                            ),
+                            11.0,
+                            Some(Color32::from_rgb(125, 225, 165)),
+                        ));
                     }
                     ui.add_space(6.0);
 
                     ui.horizontal(|ui| {
-                        ui.selectable_value(&mut self.backend_tab, BackendTab::Local, "💻 Local Folder");
-                        ui.selectable_value(&mut self.backend_tab, BackendTab::Wsl, "🐧 WSL Linux");
-                        ui.selectable_value(&mut self.backend_tab, BackendTab::Ssh, "☁ Remote SSH");
+                        ui.selectable_value(
+                            &mut self.backend_tab,
+                            BackendTab::Local,
+                            icon_text(UiIcon::Laptop, "Local Folder"),
+                        );
+                        ui.selectable_value(
+                            &mut self.backend_tab,
+                            BackendTab::Wsl,
+                            icon_text(UiIcon::Terminal, "WSL Linux"),
+                        );
+                        ui.selectable_value(
+                            &mut self.backend_tab,
+                            BackendTab::Ssh,
+                            icon_text(UiIcon::Cloud, "Remote SSH"),
+                        );
                     });
                     ui.separator();
                     ui.add_space(6.0);
@@ -266,11 +279,12 @@ impl NewWorkspaceModal {
                                 local_path_error = Some(err.to_string());
                             }
                             if let Some(ref err_msg) = local_path_error {
-                                ui.label(
-                                    egui::RichText::new(format!("⚠ {err_msg}"))
-                                        .size(11.0)
-                                        .color(Color32::from_rgb(245, 110, 110)),
-                                );
+                                ui.label(icon_label(
+                                    UiIcon::AlertTriangle,
+                                    err_msg,
+                                    11.0,
+                                    Some(Color32::from_rgb(245, 110, 110)),
+                                ));
                             }
                         }
                         BackendTab::Wsl => {
@@ -546,17 +560,20 @@ pub fn render_top_toolbar(
 
     frame.show(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
-            let sidebar_btn = ui.button(if is_sidebar_collapsed {
-                "☰ Show Sidebar"
-            } else {
-                "☰ Sidebar"
-            });
+            let sidebar_btn = ui.button(icon_text(
+                UiIcon::Menu,
+                if is_sidebar_collapsed {
+                    "Show Sidebar"
+                } else {
+                    "Sidebar"
+                },
+            ));
             if hint_tooltip(sidebar_btn, show_hints, &kb.toggle_sidebar).clicked() {
                 action = Some(ToolbarAction::ToggleSidebar);
             }
 
             if hint_tooltip(
-                ui.button("+ Workspace"),
+                ui.button(icon_text(UiIcon::Plus, "Workspace")),
                 show_hints,
                 "Choose a project folder",
             )
@@ -565,26 +582,44 @@ pub fn render_top_toolbar(
                 action = Some(ToolbarAction::OpenNewWorkspace);
             }
 
-            if hint_tooltip(ui.button("+ Tab"), show_hints, &kb.new_tab).clicked() {
+            if hint_tooltip(
+                ui.button(icon_text(UiIcon::Plus, "Tab")),
+                show_hints,
+                &kb.new_tab,
+            )
+            .clicked()
+            {
                 action = Some(ToolbarAction::NewTab);
             }
 
             ui.separator();
 
-            if hint_tooltip(ui.button("⬌ Split Right"), show_hints, &kb.split_horizontal).clicked()
+            if hint_tooltip(
+                ui.button(icon_text(UiIcon::Columns, "Split Right")),
+                show_hints,
+                &kb.split_horizontal,
+            )
+            .clicked()
             {
                 action = Some(ToolbarAction::SplitRight);
             }
 
-            if hint_tooltip(ui.button("⬍ Split Down"), show_hints, &kb.split_vertical).clicked() {
+            if hint_tooltip(
+                ui.button(icon_text(UiIcon::Rows, "Split Down")),
+                show_hints,
+                &kb.split_vertical,
+            )
+            .clicked()
+            {
                 action = Some(ToolbarAction::SplitDown);
             }
 
-            let agy_btn = ui.button(
-                egui::RichText::new("▶ Start agy")
-                    .color(Color32::from_rgb(125, 225, 165))
-                    .strong(),
-            );
+            let agy_btn = ui.button(icon_label(
+                UiIcon::Play,
+                "Start agy",
+                12.5,
+                Some(Color32::from_rgb(125, 225, 165)),
+            ));
             if hint_tooltip(
                 agy_btn,
                 show_hints,
@@ -596,7 +631,7 @@ pub fn render_top_toolbar(
             }
 
             if hint_tooltip(
-                ui.button("🌐 Preview"),
+                ui.button(icon_text(UiIcon::Globe, "Preview")),
                 show_hints,
                 "Open an embedded WebView2 browser preview split pane",
             )
@@ -606,7 +641,7 @@ pub fn render_top_toolbar(
             }
 
             if hint_tooltip(
-                ui.button("🤖 ACP"),
+                ui.button(icon_text(UiIcon::Bot, "ACP")),
                 show_hints,
                 "Switch active pane to live Antigravity ACP visual card panel",
             )
@@ -616,7 +651,7 @@ pub fn render_top_toolbar(
             }
 
             if hint_tooltip(
-                ui.button("👥 Team"),
+                ui.button(icon_text(UiIcon::Users, "Team")),
                 show_hints,
                 "Create a coordinated multi-agent team split grid tab",
             )
@@ -626,7 +661,7 @@ pub fn render_top_toolbar(
             }
 
             if hint_tooltip(
-                ui.button("⊞ Grid"),
+                ui.button(icon_text(UiIcon::LayoutGrid, "Grid")),
                 show_hints,
                 "Mission Control overview grid of all live sessions",
             )
@@ -636,7 +671,7 @@ pub fn render_top_toolbar(
             }
 
             if hint_tooltip(
-                ui.button("📣 Broadcast"),
+                ui.button(icon_text(UiIcon::Megaphone, "Broadcast")),
                 show_hints,
                 "Send a confirmed prompt to selected live sessions",
             )
@@ -646,7 +681,7 @@ pub fn render_top_toolbar(
             }
 
             if hint_tooltip(
-                ui.button("🏠 Home"),
+                ui.button(icon_text(UiIcon::Home, "Home")),
                 show_hints,
                 "Open Welcome launcher & recent sessions",
             )
@@ -675,7 +710,7 @@ pub fn render_top_toolbar(
                 }
 
                 if hint_tooltip(
-                    ui.button("⚙ Settings"),
+                    ui.button(icon_text(UiIcon::Settings, "Settings")),
                     show_hints,
                     "Open visual Settings, UI View Mode & Shortcuts",
                 )
@@ -685,11 +720,19 @@ pub fn render_top_toolbar(
                 }
 
                 let alert_label = if unread_count > 0 {
-                    egui::RichText::new(format!("🔔 Alerts ({})", unread_count))
-                        .color(Color32::from_rgb(245, 175, 45))
-                        .strong()
+                    icon_label(
+                        UiIcon::Bell,
+                        &format!("Alerts ({unread_count})"),
+                        12.5,
+                        Some(Color32::from_rgb(245, 175, 45)),
+                    )
                 } else {
-                    egui::RichText::new("🔔 Alerts").color(Color32::from_rgb(185, 190, 205))
+                    icon_label(
+                        UiIcon::Bell,
+                        "Alerts",
+                        12.5,
+                        Some(Color32::from_rgb(185, 190, 205)),
+                    )
                 };
                 if hint_tooltip(ui.button(alert_label), show_hints, &kb.toggle_notifications)
                     .clicked()
@@ -697,7 +740,12 @@ pub fn render_top_toolbar(
                     action = Some(ToolbarAction::ToggleNotifications);
                 }
 
-                if hint_tooltip(ui.button("⌘ Actions"), show_hints, &kb.command_palette).clicked()
+                if hint_tooltip(
+                    ui.button(icon_text(UiIcon::Command, "Actions")),
+                    show_hints,
+                    &kb.command_palette,
+                )
+                .clicked()
                 {
                     action = Some(ToolbarAction::OpenCommandPalette);
                 }
@@ -767,50 +815,65 @@ pub fn render_pane_header(
                     );
                 }
                 let (status_label, status_color) = friendly_status_badge(props.status);
-                ui.label(
-                    egui::RichText::new(status_label)
-                        .size(11.0)
-                        .color(status_color)
-                        .strong(),
-                );
+                ui.label(icon_label(
+                    status_icon(props.status),
+                    status_label,
+                    11.0,
+                    Some(status_color),
+                ));
                 if let Some((role, is_coord)) = props.team_role {
                     let role_color = if is_coord {
                         Color32::from_rgb(130, 165, 255)
                     } else {
                         Color32::from_rgb(115, 215, 185)
                     };
-                    ui.label(
-                        egui::RichText::new(format!("• 👥 {role}"))
-                            .size(10.5)
-                            .color(role_color)
-                            .strong(),
-                    );
+                    ui.label(icon_label(UiIcon::Users, role, 10.5, Some(role_color)));
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if hint_tooltip(ui.small_button("×"), props.show_hints, &kb.close_pane)
-                        .clicked()
+                    if hint_tooltip(
+                        ui.small_button(icon_rich(UiIcon::X, 11.0, None)),
+                        props.show_hints,
+                        &kb.close_pane,
+                    )
+                    .clicked()
                     {
                         action = Some(PaneHeaderAction::Close(pane_id));
                     }
-                    let zoom_text = if props.is_zoomed { "🗗" } else { "⛶" };
-                    if hint_tooltip(ui.small_button(zoom_text), props.show_hints, &kb.zoom_pane)
-                        .clicked()
+                    let zoom_icon = if props.is_zoomed {
+                        UiIcon::Minimize
+                    } else {
+                        UiIcon::Maximize
+                    };
+                    if hint_tooltip(
+                        ui.small_button(icon_rich(zoom_icon, 11.0, None)),
+                        props.show_hints,
+                        &kb.zoom_pane,
+                    )
+                    .clicked()
                     {
                         action = Some(PaneHeaderAction::ToggleZoom(pane_id));
                     }
-                    if hint_tooltip(ui.small_button("⬍"), props.show_hints, &kb.split_vertical)
-                        .clicked()
+                    if hint_tooltip(
+                        ui.small_button(icon_rich(UiIcon::Rows, 11.0, None)),
+                        props.show_hints,
+                        &kb.split_vertical,
+                    )
+                    .clicked()
                     {
                         action = Some(PaneHeaderAction::SplitDown(pane_id));
                     }
-                    if hint_tooltip(ui.small_button("⬌"), props.show_hints, &kb.split_horizontal)
-                        .clicked()
+                    if hint_tooltip(
+                        ui.small_button(icon_rich(UiIcon::Columns, 11.0, None)),
+                        props.show_hints,
+                        &kb.split_horizontal,
+                    )
+                    .clicked()
                     {
                         action = Some(PaneHeaderAction::SplitRight(pane_id));
                     }
                     if hint_tooltip(
-                        ui.small_button("▶ agy"),
+                        ui.small_button(icon_small(UiIcon::Play, "agy")),
                         props.show_hints,
                         "Launch Antigravity CLI in this pane",
                     )
@@ -828,13 +891,13 @@ pub fn render_pane_header(
 
 fn friendly_status_badge(status: AgentStatus) -> (&'static str, Color32) {
     match status {
-        AgentStatus::Idle => ("● Ready", Color32::from_rgb(145, 155, 175)),
-        AgentStatus::Working => ("⟳ Working…", Color32::from_rgb(105, 175, 255)),
-        AgentStatus::Thinking => ("◐ Thinking…", Color32::from_rgb(115, 200, 255)),
-        AgentStatus::RunningTool => ("⚙ Running Tool…", Color32::from_rgb(245, 195, 85)),
-        AgentStatus::WaitingForInput => ("⚠ Needs Answer", Color32::from_rgb(245, 175, 45)),
-        AgentStatus::Done => ("✓ Done", Color32::from_rgb(45, 200, 110)),
-        AgentStatus::Failed => ("✕ Error", Color32::from_rgb(235, 60, 60)),
+        AgentStatus::Idle => ("Ready", Color32::from_rgb(145, 155, 175)),
+        AgentStatus::Working => ("Working…", Color32::from_rgb(105, 175, 255)),
+        AgentStatus::Thinking => ("Thinking…", Color32::from_rgb(115, 200, 255)),
+        AgentStatus::RunningTool => ("Running Tool…", Color32::from_rgb(245, 195, 85)),
+        AgentStatus::WaitingForInput => ("Needs Answer", Color32::from_rgb(245, 175, 45)),
+        AgentStatus::Done => ("Done", Color32::from_rgb(45, 200, 110)),
+        AgentStatus::Failed => ("Error", Color32::from_rgb(235, 60, 60)),
     }
 }
 
@@ -876,12 +939,12 @@ pub fn render_workspace_folder_bar(
                 } => format!("SSH {} ({})", target, remote_dir.as_deref().unwrap_or("~")),
             };
 
-            ui.label(
-                egui::RichText::new("📁 Working in:")
-                    .size(11.0)
-                    .color(Color32::from_rgb(150, 160, 180))
-                    .strong(),
-            );
+            ui.label(icon_label(
+                UiIcon::Folder,
+                "Working in:",
+                11.0,
+                Some(Color32::from_rgb(150, 160, 180)),
+            ));
             ui.label(
                 egui::RichText::new(location)
                     .size(11.0)
@@ -891,28 +954,29 @@ pub fn render_workspace_folder_bar(
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let lock_btn = if let Some(root) = allowed_root {
                     let txt = if sandbox_enabled {
-                        format!("🔒 Locked: {} + --sandbox", display_clean_path(root))
+                        format!("Locked: {} + --sandbox", display_clean_path(root))
                     } else {
-                        format!("🔒 Locked inside: {}", display_clean_path(root))
+                        format!("Locked inside: {}", display_clean_path(root))
                     };
-                    ui.small_button(
-                        egui::RichText::new(txt)
-                            .size(10.5)
-                            .color(Color32::from_rgb(125, 225, 165))
-                            .strong(),
-                    )
+                    ui.small_button(icon_label(
+                        UiIcon::Lock,
+                        &txt,
+                        10.5,
+                        Some(Color32::from_rgb(125, 225, 165)),
+                    ))
                     .on_hover_text("Click to manage Safe Folder Lock & agy sandbox settings")
                 } else {
-                    let txt = if sandbox_enabled {
-                        "🛡 Sandbox On • 🔓 Folder Unrestricted"
+                    let (ic, txt) = if sandbox_enabled {
+                        (UiIcon::Shield, "Sandbox On • Unrestricted")
                     } else {
-                        "🔓 Unrestricted Folder (Click to Lock…)"
+                        (UiIcon::LockOpen, "Unrestricted Folder (Click to Lock…)")
                     };
-                    ui.small_button(
-                        egui::RichText::new(txt)
-                            .size(10.5)
-                            .color(Color32::from_rgb(245, 190, 95)),
-                    )
+                    ui.small_button(icon_label(
+                        ic,
+                        txt,
+                        10.5,
+                        Some(Color32::from_rgb(245, 190, 95)),
+                    ))
                     .on_hover_text("Restrict where Age Max & agents can open workspaces")
                 };
 

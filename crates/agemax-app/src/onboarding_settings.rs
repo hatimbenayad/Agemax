@@ -1,5 +1,6 @@
 use crate::chrome_ui::{centered_modal_pos, modal_frame};
 use crate::folder_picker::spawn_folder_picker_async;
+use crate::icons::{icon_label, icon_text, UiIcon};
 use agemax_agy::adapter::{AgentAdapter, AgentLaunchPreset, AntigravityAdapter};
 use agemax_agy::profile::{ProfileConfig, ProfileManager};
 use agemax_config::keybindings::KeybindingsConfig;
@@ -114,12 +115,15 @@ pub fn render_onboarding_banner(
                     .color(Color32::from_rgb(220, 210, 195)),
             );
 
-            let copy_label = if state.copied_feedback {
-                "Copied ✓"
-            } else {
-                "Copy Install Command"
-            };
-            if ui.button(copy_label).clicked() {
+            if state.copied_feedback {
+                if ui
+                    .button(icon_text(UiIcon::CircleCheck, "Copied"))
+                    .clicked()
+                {
+                    ui.ctx().copy_text(OFFICIAL_AGY_INSTALL_CMD.to_string());
+                    state.copied_feedback = true;
+                }
+            } else if ui.button("Copy Install Command").clicked() {
                 ui.ctx().copy_text(OFFICIAL_AGY_INSTALL_CMD.to_string());
                 state.copied_feedback = true;
             }
@@ -251,26 +255,27 @@ impl AgentLauncherModal {
                     );
                     ui.add_space(4.0);
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "📁 Working in: {}",
-                                display_clean_path(workspace_cwd)
-                            ))
-                            .size(11.5)
-                            .color(Color32::from_rgb(135, 210, 250))
-                            .strong(),
-                        );
+                        ui.label(icon_label(
+                            UiIcon::Folder,
+                            &format!("Working in: {}", display_clean_path(workspace_cwd)),
+                            11.5,
+                            Some(Color32::from_rgb(135, 210, 250)),
+                        ));
                         if allowed_root.is_some() {
-                            ui.label(
-                                egui::RichText::new("• 🔒 Safe Folder Locked")
-                                    .size(11.0)
-                                    .color(Color32::from_rgb(125, 225, 165)),
-                            );
+                            ui.label(icon_label(
+                                UiIcon::Lock,
+                                "Safe Folder Locked",
+                                11.0,
+                                Some(Color32::from_rgb(125, 225, 165)),
+                            ));
                         }
                     });
                     ui.checkbox(
                         &mut self.sandbox_mode,
-                        "🛡 Run with agy --sandbox (enable CLI sandbox restrictions)",
+                        icon_text(
+                            UiIcon::Shield,
+                            "Run with agy --sandbox (enable CLI sandbox restrictions)",
+                        ),
                     );
 
                     let missing_agy = preflight
@@ -281,12 +286,12 @@ impl AgentLauncherModal {
                     if missing_agy {
                         ui.add_space(6.0);
                         ui.horizontal_wrapped(|ui| {
-                            ui.label(
-                                egui::RichText::new("⚠ agy.exe not detected yet.")
-                                    .size(11.5)
-                                    .color(Color32::from_rgb(245, 175, 45))
-                                    .strong(),
-                            );
+                            ui.label(icon_label(
+                                UiIcon::AlertTriangle,
+                                "agy.exe not detected yet.",
+                                11.5,
+                                Some(Color32::from_rgb(245, 175, 45)),
+                            ));
                             if ui.small_button("Copy Install Command").clicked() {
                                 ctx.copy_text(OFFICIAL_AGY_INSTALL_CMD.to_string());
                                 preflight.copied_feedback = true;
@@ -398,23 +403,26 @@ impl AgentLauncherModal {
 
                     let cards = [
                         (
-                            "▶ Start New Agent Session",
+                            UiIcon::Play,
+                            "Start New Agent Session",
                             "Launches a fresh Antigravity conversation (agy) ready to read and work in your folder.",
                             AgentLaunchPreset::NewSession,
                         ),
                         (
-                            "🛡 Safe Plan Mode (Recommended for Beginners)",
+                            UiIcon::Shield,
+                            "Safe Plan Mode (Recommended for Beginners)",
                             "Asks the AI to show you a step-by-step plan first before making edits (agy --mode plan).",
                             AgentLaunchPreset::SafePlanMode,
                         ),
                         (
-                            "↻ Continue Last Conversation",
+                            UiIcon::RotateCw,
+                            "Continue Last Conversation",
                             "Resumes your most recent Antigravity chat in this project directory (agy -c).",
                             AgentLaunchPreset::ContinueLast,
                         ),
                     ];
 
-                    for (title, subtitle, preset) in cards {
+                    for (icon, title, subtitle, preset) in cards {
                         let card_frame = egui::Frame::new()
                             .fill(Color32::from_rgb(31, 36, 52))
                             .corner_radius(6.0)
@@ -423,12 +431,12 @@ impl AgentLauncherModal {
                         card_frame.show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.vertical(|ui| {
-                                    ui.label(
-                                        egui::RichText::new(title)
-                                            .size(13.0)
-                                            .color(Color32::WHITE)
-                                            .strong(),
-                                    );
+                                    ui.label(icon_label(
+                                        icon,
+                                        title,
+                                        13.0,
+                                        Some(Color32::WHITE),
+                                    ));
                                     ui.label(
                                         egui::RichText::new(subtitle)
                                             .size(11.0)
@@ -569,14 +577,26 @@ impl SettingsModal {
 
                     ui.add_space(6.0);
                     ui.horizontal_wrapped(|ui| {
-                        for (tab, label) in [
-                            (SettingsTab::Appearance, "Appearance"),
-                            (SettingsTab::Safety, "🛡 Safety & Folders"),
-                            (SettingsTab::TerminalAlerts, "Terminal & Alerts"),
-                            (SettingsTab::Shortcuts, "Shortcuts"),
-                            (SettingsTab::QuickActions, "Quick Actions"),
+                        for (tab, opt_icon, label) in [
+                            (SettingsTab::Appearance, None, "Appearance"),
+                            (
+                                SettingsTab::Safety,
+                                Some(UiIcon::Shield),
+                                "Safety & Folders",
+                            ),
+                            (SettingsTab::TerminalAlerts, None, "Terminal & Alerts"),
+                            (SettingsTab::Shortcuts, None, "Shortcuts"),
+                            (SettingsTab::QuickActions, None, "Quick Actions"),
                         ] {
-                            if ui.selectable_label(self.active_tab == tab, label).clicked() {
+                            let clicked = match opt_icon {
+                                Some(ic) => ui
+                                    .selectable_label(self.active_tab == tab, icon_text(ic, label))
+                                    .clicked(),
+                                None => {
+                                    ui.selectable_label(self.active_tab == tab, label).clicked()
+                                }
+                            };
+                            if clicked {
                                 self.active_tab = tab;
                             }
                         }
@@ -695,18 +715,19 @@ fn render_safety_tab(
     );
     ui.add_space(4.0);
     if let Some(root) = &config.general.allowed_root_dir {
-        ui.label(
-            egui::RichText::new(format!("🔒 Active Lock: {}", display_clean_path(root)))
-                .size(11.5)
-                .color(Color32::from_rgb(125, 225, 165))
-                .strong(),
-        );
+        ui.label(icon_label(
+            UiIcon::Lock,
+            &format!("Active Lock: {}", display_clean_path(root)),
+            11.5,
+            Some(Color32::from_rgb(125, 225, 165)),
+        ));
     } else {
-        ui.label(
-            egui::RichText::new("🔓 Currently unrestricted — workspaces can open in any folder.")
-                .size(11.5)
-                .color(Color32::from_rgb(245, 190, 95)),
-        );
+        ui.label(icon_label(
+            UiIcon::LockOpen,
+            "Currently unrestricted — workspaces can open in any folder.",
+            11.5,
+            Some(Color32::from_rgb(245, 190, 95)),
+        ));
     }
     ui.add_space(4.0);
     ui.horizontal(|ui| {
@@ -1167,18 +1188,20 @@ fn render_shortcuts_tab(
         ui.add_space(4.0);
         match res {
             Ok(()) => {
-                ui.label(
-                    egui::RichText::new("✓ Shortcuts saved and active.")
-                        .size(11.5)
-                        .color(Color32::from_rgb(75, 215, 135)),
-                );
+                ui.label(icon_label(
+                    UiIcon::CircleCheck,
+                    "Shortcuts saved and active.",
+                    11.5,
+                    Some(Color32::from_rgb(75, 215, 135)),
+                ));
             }
             Err(err) => {
-                ui.label(
-                    egui::RichText::new(format!("✕ {}", err))
-                        .size(11.5)
-                        .color(Color32::from_rgb(245, 95, 95)),
-                );
+                ui.label(icon_label(
+                    UiIcon::CircleX,
+                    err,
+                    11.5,
+                    Some(Color32::from_rgb(245, 95, 95)),
+                ));
             }
         }
     }
@@ -1193,13 +1216,12 @@ fn render_quick_actions_tab(
     new_desc: &mut String,
 ) -> bool {
     let mut changed = false;
-    ui.label(
-        egui::RichText::new(
-            "Custom Quick Actions appear directly inside ⌘ Actions (Command Palette).",
-        )
-        .size(11.5)
-        .color(Color32::from_rgb(165, 175, 195)),
-    );
+    ui.label(icon_label(
+        UiIcon::Command,
+        "Custom Quick Actions appear directly inside Actions (Command Palette).",
+        11.5,
+        Some(Color32::from_rgb(165, 175, 195)),
+    ));
     ui.add_space(6.0);
 
     let mut remove_idx = None;

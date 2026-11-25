@@ -36,13 +36,13 @@ impl AgentStatus {
 
     pub fn icon(&self) -> &'static str {
         match self {
-            Self::Idle => "○",
-            Self::Working => "⚡",
-            Self::Thinking => "◐",
-            Self::RunningTool => "⚙",
-            Self::WaitingForInput => "⚠",
-            Self::Done => "✓",
-            Self::Failed => "✕",
+            Self::Idle => "o",
+            Self::Working => "*",
+            Self::Thinking => "~",
+            Self::RunningTool => "#",
+            Self::WaitingForInput => "!",
+            Self::Done => "+",
+            Self::Failed => "x",
         }
     }
 }

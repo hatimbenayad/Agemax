@@ -3260,9 +3260,9 @@ impl eframe::App for AgeMaxApp {
                                                 .max_rect(pill_rect),
                                             |ui| {
                                                 if ui
-                                                    .small_button(format!(
-                                                        "↓ Latest (+{})",
-                                                        scroll_offset
+                                                    .small_button(icons::icon_small(
+                                                        icons::UiIcon::ArrowDown,
+                                                        &format!("Latest (+{})", scroll_offset),
                                                     ))
                                                     .clicked()
                                                 {

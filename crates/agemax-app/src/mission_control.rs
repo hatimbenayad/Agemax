@@ -5,6 +5,7 @@
 //! - Welcome / Quick-Launch Empty State Card View
 
 use crate::chrome_ui::{centered_modal_pos, modal_frame};
+use crate::icons::{icon_label, icon_small, icon_text, status_icon, text_then_icon, UiIcon};
 use crate::telemetry::{format_elapsed_compact, render_sparkline, SPARKLINE_BUCKETS};
 use crate::visual_alive::{render_agent_mascot, ThemeChromeColors};
 use agemax_config::theme::ResolvedTheme;
@@ -64,19 +65,22 @@ pub fn render_agents_grid(
     ui.vertical(|ui| {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("⊞ ALL AGENTS MISSION GRID")
-                    .size(13.0)
-                    .color(chrome.text_primary)
-                    .strong(),
-            );
+            ui.label(icon_label(
+                UiIcon::LayoutGrid,
+                "ALL AGENTS MISSION GRID",
+                13.0,
+                Some(chrome.text_primary),
+            ));
             ui.label(
                 egui::RichText::new(format!("({} live sessions)", cards.len()))
                     .size(11.5)
                     .color(chrome.text_muted),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("← Return to Split View").clicked() {
+                if ui
+                    .button(icon_text(UiIcon::ArrowLeft, "Return to Split View"))
+                    .clicked()
+                {
                     action = Some(GridViewAction::ExitGridView);
                 }
             });
@@ -149,16 +153,12 @@ pub fn render_agents_grid(
                                     });
 
                                     ui.horizontal(|ui| {
-                                        ui.label(
-                                            egui::RichText::new(format!(
-                                                "{} {}",
-                                                card.status.icon(),
-                                                card.status.display_name()
-                                            ))
-                                            .size(11.0)
-                                            .color(border_col)
-                                            .strong(),
-                                        );
+                                        ui.label(icon_label(
+                                            status_icon(card.status),
+                                            card.status.display_name(),
+                                            11.0,
+                                            Some(border_col),
+                                        ));
                                         ui.label(
                                             egui::RichText::new(format!("• {}", card.kind_label))
                                                 .size(10.5)
@@ -178,11 +178,12 @@ pub fn render_agents_grid(
 
                                     ui.horizontal(|ui| {
                                         if let Some(branch) = &card.git_branch {
-                                            ui.label(
-                                                egui::RichText::new(format!("⎇ {branch}"))
-                                                    .size(10.5)
-                                                    .color(Color32::from_rgb(110, 195, 145)),
-                                            );
+                                            ui.label(icon_label(
+                                                UiIcon::GitBranch,
+                                                branch,
+                                                10.5,
+                                                Some(Color32::from_rgb(110, 195, 145)),
+                                            ));
                                         }
                                         if let Some(stat) = card.git_stats {
                                             if stat.has_changes() {
@@ -277,7 +278,7 @@ pub fn render_right_drawer(
                 if ui
                     .selectable_label(
                         active_tab == RightDrawerTab::Alerts,
-                        format!("🔔 Alerts ({})", unread.len()),
+                        icon_small(UiIcon::Bell, &format!("Alerts ({})", unread.len())),
                     )
                     .clicked()
                 {
@@ -286,7 +287,7 @@ pub fn render_right_drawer(
                 if ui
                     .selectable_label(
                         active_tab == RightDrawerTab::ActivityFeed,
-                        format!("📡 Feed ({})", feed_entries.len()),
+                        icon_small(UiIcon::Radio, &format!("Feed ({})", feed_entries.len())),
                     )
                     .clicked()
                 {
@@ -315,16 +316,12 @@ pub fn render_right_drawer(
                         for item in unread {
                             let col = status_color(item.status, resolved_theme);
                             ui.group(|ui| {
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "{} {}",
-                                        item.status.icon(),
-                                        item.status.display_name()
-                                    ))
-                                    .size(11.0)
-                                    .color(col)
-                                    .strong(),
-                                );
+                                ui.label(icon_label(
+                                    status_icon(item.status),
+                                    item.status.display_name(),
+                                    11.0,
+                                    Some(col),
+                                ));
                                 ui.label(
                                     egui::RichText::new(&item.message)
                                         .size(11.0)
@@ -464,12 +461,12 @@ impl BroadcastModal {
             .show(ctx, |ui| {
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new("📣 Safe Prompt Broadcast")
-                                .size(15.0)
-                                .color(Color32::WHITE)
-                                .strong(),
-                        );
+                        ui.label(icon_label(
+                            UiIcon::Megaphone,
+                            "Safe Prompt Broadcast",
+                            15.0,
+                            Some(Color32::WHITE),
+                        ));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("Cancel").clicked() {
                                 should_close = true;
@@ -522,22 +519,23 @@ impl BroadcastModal {
                                         }
                                     }
                                     let label = format!(
-                                        "{} {} ({}) • [{}] • {}",
-                                        target.status.icon(),
+                                        "{} ({}) • [{}] • {}",
                                         target.workspace_name,
                                         target.tab_title,
                                         target.backend_label,
                                         target.folder_display
                                     );
-                                    ui.label(
-                                        egui::RichText::new(label)
-                                            .size(11.0)
-                                            .color(if target.is_ready {
-                                                Color32::from_rgb(215, 222, 238)
-                                            } else {
-                                                Color32::GRAY
-                                            }),
-                                    );
+                                    let text_col = if target.is_ready {
+                                        Color32::from_rgb(215, 222, 238)
+                                    } else {
+                                        Color32::GRAY
+                                    };
+                                    ui.label(icon_label(
+                                        status_icon(target.status),
+                                        &label,
+                                        11.0,
+                                        Some(text_col),
+                                    ));
                                 });
                             }
                         });
@@ -629,10 +627,15 @@ pub fn render_welcome_view(
 
             ui.horizontal(|ui| {
                 ui.add_space((ui.available_width() - 560.0).max(16.0) * 0.5);
-                for (title, sub, act) in [
-                    ("▶ Start Agent", "Open interactive agy", 1u8),
-                    ("🛡 Plan Agent", "Run agy --mode plan", 2u8),
-                    ("👥 Agent Team Grid", "Coordinator + Workers", 3u8),
+                for (icon, title, sub, act) in [
+                    (UiIcon::Play, "Start Agent", "Open interactive agy", 1u8),
+                    (UiIcon::Shield, "Plan Agent", "Run agy --mode plan", 2u8),
+                    (
+                        UiIcon::Users,
+                        "Agent Team Grid",
+                        "Coordinator + Workers",
+                        3u8,
+                    ),
                 ] {
                     let frame = egui::Frame::new()
                         .fill(chrome.panel_bg)
@@ -642,12 +645,7 @@ pub fn render_welcome_view(
                     frame.show(ui, |ui| {
                         ui.set_min_width(168.0);
                         ui.vertical(|ui| {
-                            ui.label(
-                                egui::RichText::new(title)
-                                    .size(12.5)
-                                    .color(chrome.text_primary)
-                                    .strong(),
-                            );
+                            ui.label(icon_label(icon, title, 12.5, Some(chrome.text_primary)));
                             ui.label(egui::RichText::new(sub).size(11.0).color(chrome.text_muted));
                             ui.add_space(6.0);
                             if ui.button("Launch").clicked() {
@@ -675,7 +673,10 @@ pub fn render_welcome_view(
                     ui.add_space(4.0);
                     for ws in snap.workspaces.iter().take(4) {
                         if ui
-                            .button(format!("📁 {} — {}", ws.name, ws.cwd.display()))
+                            .button(icon_text(
+                                UiIcon::Folder,
+                                &format!("{} — {}", ws.name, ws.cwd.display()),
+                            ))
                             .clicked()
                         {
                             action = Some(WelcomeAction::RestoreRecentWorkspace(ws.cwd.clone()));
@@ -687,10 +688,21 @@ pub fn render_welcome_view(
 
             ui.horizontal(|ui| {
                 ui.add_space((ui.available_width() - 290.0).max(16.0) * 0.5);
-                if ui.button("+ Pick Project Folder…").clicked() {
+                if ui
+                    .button(icon_text(UiIcon::Plus, "Pick Project Folder…"))
+                    .clicked()
+                {
                     action = Some(WelcomeAction::OpenNewWorkspaceModal);
                 }
-                if ui.button("Go Straight to Terminal →").clicked() {
+                if ui
+                    .button(text_then_icon(
+                        "Go Straight to Terminal",
+                        UiIcon::ArrowRight,
+                        12.5,
+                        None,
+                    ))
+                    .clicked()
+                {
                     action = Some(WelcomeAction::Dismiss);
                 }
             });

@@ -1,5 +1,6 @@
 //! Embedded Microsoft WebView2 preview pane with scriptable IPC eval & screenshot capture (Unit 7 §A).
 
+use crate::icons::{icon_label, icon_rich, icon_small, UiIcon};
 use agemax_core::layout::PaneId;
 use eframe::egui::{self, Color32, Key, Pos2, Rect, Stroke, Vec2};
 use serde_json::Value;
@@ -445,13 +446,25 @@ pub fn render_browser_pane(
             .max_rect(toolbar_rect.shrink2(Vec2::new(6.0, 3.0))),
         |ui| {
             ui.horizontal(|ui| {
-                if ui.small_button("◀").on_hover_text("Back").clicked() {
+                if ui
+                    .small_button(icon_rich(UiIcon::ArrowLeft, 11.0, None))
+                    .on_hover_text("Back")
+                    .clicked()
+                {
                     surface.go_back();
                 }
-                if ui.small_button("▶").on_hover_text("Forward").clicked() {
+                if ui
+                    .small_button(icon_rich(UiIcon::ArrowRight, 11.0, None))
+                    .on_hover_text("Forward")
+                    .clicked()
+                {
                     surface.go_forward();
                 }
-                if ui.small_button("↻").on_hover_text("Reload").clicked() {
+                if ui
+                    .small_button(icon_rich(UiIcon::RotateCw, 11.0, None))
+                    .on_hover_text("Reload")
+                    .clicked()
+                {
                     surface.reload();
                 }
 
@@ -470,14 +483,14 @@ pub fn render_browser_pane(
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
-                        .small_button("← Terminal")
+                        .small_button(icon_small(UiIcon::ArrowLeft, "Terminal"))
                         .on_hover_text("Switch this pane back to terminal")
                         .clicked()
                     {
                         action = Some(BrowserPaneAction::SwitchToTerminal(pane_id));
                     }
                     if ui
-                        .small_button("↗ Ext")
+                        .small_button(icon_small(UiIcon::ArrowUpRight, "Ext"))
                         .on_hover_text("Open URL in system default browser")
                         .clicked()
                     {
@@ -508,12 +521,12 @@ pub fn render_browser_pane(
             |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(24.0);
-                    ui.label(
-                        egui::RichText::new("🌐 Embedded WebView2 Preview Unavailable")
-                            .size(14.0)
-                            .color(Color32::from_rgb(245, 175, 45))
-                            .strong(),
-                    );
+                    ui.label(icon_label(
+                        UiIcon::Globe,
+                        "Embedded WebView2 Preview Unavailable",
+                        14.0,
+                        Some(Color32::from_rgb(245, 175, 45)),
+                    ));
                     ui.add_space(6.0);
                     ui.label(
                         egui::RichText::new(err)

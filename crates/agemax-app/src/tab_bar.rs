@@ -1,3 +1,4 @@
+use crate::icons::{icon_rich, UiIcon};
 use crate::visual_alive::ThemeChromeColors;
 use agemax_config::theme::ResolvedTheme;
 use agemax_core::workspace::Tab;
@@ -61,9 +62,7 @@ pub fn render_tab_bar(
                         if is_active {
                             ui.add_space(2.0);
                             if ui
-                                .small_button(
-                                    egui::RichText::new("✎").size(10.0).color(Color32::GRAY),
-                                )
+                                .small_button(icon_rich(UiIcon::Pencil, 10.5, Some(Color32::GRAY)))
                                 .on_hover_text("Rename tab")
                                 .clicked()
                             {
@@ -74,7 +73,7 @@ pub fn render_tab_bar(
                         if tabs.len() > 1 {
                             ui.add_space(4.0);
                             if ui
-                                .button(egui::RichText::new("×").size(11.0).color(Color32::GRAY))
+                                .button(icon_rich(UiIcon::X, 11.0, Some(Color32::GRAY)))
                                 .clicked()
                             {
                                 action = Some(TabBarAction::Close(idx));
@@ -86,7 +85,7 @@ pub fn render_tab_bar(
                 ui.add_space(2.0);
             }
 
-            let add_btn = ui.button("+");
+            let add_btn = ui.button(icon_rich(UiIcon::Plus, 12.0, None));
             let add_btn = if show_hints {
                 add_btn.on_hover_text("New Tab")
             } else {

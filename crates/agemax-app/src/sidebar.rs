@@ -1,3 +1,4 @@
+use crate::icons::{icon_label, icon_rich, icon_small, icon_text, status_icon, UiIcon};
 use crate::telemetry::{format_elapsed_compact, render_sparkline, SPARKLINE_BUCKETS};
 use crate::visual_alive::ThemeChromeColors;
 use agemax_config::theme::ResolvedTheme;
@@ -58,8 +59,12 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                         );
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let toggle_label = if props.is_collapsed { "»" } else { "«" };
-                        if ui.button(toggle_label).clicked() {
+                        let toggle_icon = if props.is_collapsed {
+                            UiIcon::ChevronsRight
+                        } else {
+                            UiIcon::ChevronsLeft
+                        };
+                        if ui.button(icon_rich(toggle_icon, 12.0, None)).clicked() {
                             action = Some(SidebarAction::ToggleCollapse);
                         }
                     });
@@ -136,11 +141,11 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                                 }
 
                                 if let Some(status) = meta.status {
-                                    ui.label(
-                                        egui::RichText::new(status.icon())
-                                            .size(11.0)
-                                            .color(chrome.text_muted),
-                                    );
+                                    ui.label(icon_rich(
+                                        status_icon(status),
+                                        11.0,
+                                        Some(chrome.text_muted),
+                                    ));
                                 }
 
                                 if let Some(elapsed) = meta.working_elapsed_secs {
@@ -166,14 +171,14 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                                     |ui| {
                                         if props.workspaces.len() > 1
                                             && ui
-                                                .small_button("×")
+                                                .small_button(icon_rich(UiIcon::X, 10.5, None))
                                                 .on_hover_text("Close workspace")
                                                 .clicked()
                                         {
                                             action = Some(SidebarAction::CloseWorkspace(idx));
                                         }
                                         if ui
-                                            .small_button("✎")
+                                            .small_button(icon_rich(UiIcon::Pencil, 10.5, None))
                                             .on_hover_text("Rename workspace")
                                             .clicked()
                                         {
@@ -199,11 +204,12 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                                         .color(chrome.text_muted),
                                 );
                                 if let Some(branch) = &ws.git_branch {
-                                    ui.label(
-                                        egui::RichText::new(format!("⎇ {branch}"))
-                                            .size(10.0)
-                                            .color(Color32::from_rgb(110, 190, 140)),
-                                    );
+                                    ui.label(icon_label(
+                                        UiIcon::GitBranch,
+                                        branch,
+                                        10.0,
+                                        Some(Color32::from_rgb(110, 190, 140)),
+                                    ));
                                 }
                                 if let Some(stat) = meta.git_stats {
                                     if stat.has_changes() {
@@ -239,17 +245,18 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
 
                             if let Some(snippet) = &meta.latest_snippet {
                                 ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(format!("⚠ {}", snippet))
-                                            .size(10.0)
-                                            .color(Color32::from_rgb(245, 175, 45)),
-                                    )
+                                    egui::Label::new(icon_label(
+                                        UiIcon::AlertTriangle,
+                                        snippet,
+                                        10.0,
+                                        Some(Color32::from_rgb(245, 175, 45)),
+                                    ))
                                     .truncate(),
                                 );
                             } else if let Some(last_line) = &meta.last_output_line {
                                 ui.add(
                                     egui::Label::new(
-                                        egui::RichText::new(format!("› {}", last_line))
+                                        egui::RichText::new(format!("> {last_line}"))
                                             .size(10.0)
                                             .monospace()
                                             .color(chrome.text_muted),
@@ -267,24 +274,31 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                 ui.add_space(8.0);
                 if !props.is_collapsed {
                     ui.horizontal(|ui| {
-                        if ui.button("+ New Workspace").clicked() {
+                        if ui
+                            .button(icon_text(UiIcon::Plus, "New Workspace"))
+                            .clicked()
+                        {
                             action = Some(SidebarAction::CreateWorkspace);
                         }
                     });
                     ui.add_space(6.0);
                     if ui
-                        .small_button("⚙ View & Shortcuts")
+                        .small_button(icon_small(UiIcon::Settings, "View & Shortcuts"))
                         .on_hover_text("Switch Guided/Minimal mode or inspect shortcuts")
                         .clicked()
                     {
                         action = Some(SidebarAction::OpenViewSettings);
                     }
                 } else {
-                    if ui.button("+").on_hover_text("New Workspace").clicked() {
+                    if ui
+                        .button(icon_rich(UiIcon::Plus, 12.0, None))
+                        .on_hover_text("New Workspace")
+                        .clicked()
+                    {
                         action = Some(SidebarAction::CreateWorkspace);
                     }
                     if ui
-                        .small_button("⚙")
+                        .small_button(icon_rich(UiIcon::Settings, 12.0, None))
                         .on_hover_text("View & Shortcuts")
                         .clicked()
                     {

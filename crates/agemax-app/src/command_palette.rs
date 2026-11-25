@@ -1,3 +1,4 @@
+use crate::icons::{icon_rich, UiIcon};
 use agemax_config::keybindings::KeybindingsConfig;
 use agemax_config::schema::CustomCommand;
 use eframe::egui::{self, Color32, Key, Pos2, Rect, Sense, Stroke, Vec2};
@@ -261,11 +262,11 @@ impl CommandPalette {
                 ui.vertical(|ui| {
                     // Search input bar
                     ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new("🔍")
-                                .size(14.0)
-                                .color(Color32::from_rgb(140, 145, 160)),
-                        );
+                        ui.label(icon_rich(
+                            UiIcon::Search,
+                            14.0,
+                            Some(Color32::from_rgb(140, 145, 160)),
+                        ));
                         let text_edit = egui::TextEdit::singleline(&mut self.query)
                             .hint_text("Type a command or search actions...")
                             .text_color(Color32::WHITE)
