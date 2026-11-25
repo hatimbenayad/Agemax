@@ -46,9 +46,9 @@ use agemax_term::vt::GridPoint;
 use agemax_term::PtySystemBackend;
 use backdrop_win::BackdropController;
 use chrome_ui::{
-    render_pane_header, render_top_toolbar, render_workspace_folder_bar, NewWorkspaceModal,
-    NewWorkspaceRequest, PaneHeaderAction, PaneHeaderProps, RenameModal, RenameTarget,
-    ToolbarAction,
+    render_header_strip, render_pane_header, render_top_toolbar, render_workspace_folder_bar,
+    NewWorkspaceModal, NewWorkspaceRequest, PaneHeaderAction, PaneHeaderProps, RenameModal,
+    RenameTarget, ToolbarAction,
 };
 use command_palette::{CommandPalette, PaletteAction};
 use eframe::egui::{self, Color32, FontId, Key, Pos2, Rect, Stroke, StrokeKind, Vec2};
@@ -2250,7 +2250,21 @@ impl eframe::App for AgeMaxApp {
         } else {
             color32_from_rgb(bg_rgb)
         };
-        // 1. Left Workspace Sidebar (full viewport height)
+        // 0. Full-width App Header Strip with Command Palette Search Pill (below native title bar)
+        if self.config.general.effective_show_toolbar() {
+            let header_act = egui::Panel::top("app_header_strip")
+                .show_separator_line(false)
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| {
+                    render_header_strip(ui, &self.config, &resolved_theme)
+                })
+                .inner;
+            if let Some(ToolbarAction::OpenCommandPalette) = header_act {
+                self.command_palette.open();
+            }
+        }
+
+        // 1. Left Workspace Sidebar (full viewport height below header)
         let sidebar_width = if self.is_sidebar_collapsed {
             48.0
         } else {

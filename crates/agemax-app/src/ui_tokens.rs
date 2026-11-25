@@ -6,6 +6,9 @@ use eframe::egui::{self, Color32, CornerRadius, Stroke};
 /// Consistent UI spacing and corner radius constants across chrome panels.
 pub mod metrics {
     pub const RADIUS_SM: f32 = 6.0;
+    pub const RADIUS_MD: f32 = 8.0;
+
+    pub const HEADER_HEIGHT: f32 = 38.0;
 }
 
 /// Unified color tokens harmonized across all built-in theme presets.

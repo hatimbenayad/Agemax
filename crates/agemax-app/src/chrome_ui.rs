@@ -1,5 +1,6 @@
 use crate::folder_picker::spawn_folder_picker_async;
 use crate::icons::{icon_label, icon_rich, icon_small, icon_text, status_icon, UiIcon};
+use crate::ui_tokens::{metrics, UiTokens};
 use crate::visual_alive::{render_agent_mascot, ThemeChromeColors};
 pub use agemax_config::keybindings::KeybindingsConfig;
 use agemax_config::safety::{display_clean_path, validate_workspace_path};
@@ -534,6 +535,154 @@ impl RenameModal {
         }
         submitted
     }
+}
+
+/// Render the top header strip with app brand mark and centered dynamic Command Palette search pill.
+pub fn render_header_strip(
+    ui: &mut egui::Ui,
+    config: &AgeMaxConfig,
+    resolved_theme: &ResolvedTheme,
+) -> Option<ToolbarAction> {
+    if !config.general.effective_show_toolbar() {
+        return None;
+    }
+
+    let tokens = UiTokens::from_theme(resolved_theme);
+    let mut action = None;
+
+    let (bar_rect, _) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), metrics::HEADER_HEIGHT),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    painter.rect_filled(bar_rect, 0.0, tokens.bg_chrome);
+    painter.line_segment(
+        [
+            Pos2::new(bar_rect.min.x, bar_rect.max.y),
+            Pos2::new(bar_rect.max.x, bar_rect.max.y),
+        ],
+        Stroke::new(1.0, tokens.border_subtle),
+    );
+
+    // Left brand mark: purple rounded badge + "Age Max"
+    let logo_rect = Rect::from_min_size(
+        Pos2::new(bar_rect.min.x + 12.0, bar_rect.center().y - 11.0),
+        Vec2::new(22.0, 22.0),
+    );
+    painter.rect_filled(logo_rect, metrics::RADIUS_SM, tokens.accent_primary);
+    let lc = logo_rect.center();
+    painter.line_segment(
+        [
+            Pos2::new(lc.x - 4.5, lc.y + 5.0),
+            Pos2::new(lc.x, lc.y - 5.5),
+        ],
+        Stroke::new(2.0, Color32::WHITE),
+    );
+    painter.line_segment(
+        [
+            Pos2::new(lc.x, lc.y - 5.5),
+            Pos2::new(lc.x + 4.5, lc.y + 5.0),
+        ],
+        Stroke::new(2.0, Color32::WHITE),
+    );
+    painter.line_segment(
+        [
+            Pos2::new(lc.x - 2.6, lc.y + 1.5),
+            Pos2::new(lc.x + 2.6, lc.y + 1.5),
+        ],
+        Stroke::new(1.7, Color32::WHITE),
+    );
+    painter.text(
+        Pos2::new(logo_rect.max.x + 8.0, bar_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        "Age Max",
+        egui::FontId::proportional(13.5),
+        tokens.text_primary,
+    );
+
+    // Centered clickable search pill showing active Command Palette chord dynamically
+    let pill_w = (bar_rect.width() - 280.0).clamp(240.0, 440.0);
+    let pill_rect = Rect::from_center_size(bar_rect.center(), Vec2::new(pill_w, 26.0));
+    let pill_resp = ui.interact(
+        pill_rect,
+        egui::Id::unique("top_search_pill"),
+        egui::Sense::click(),
+    );
+    let hovered = pill_resp.hovered();
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    painter.rect_filled(
+        pill_rect,
+        metrics::RADIUS_MD,
+        if hovered {
+            tokens.bg_elevated
+        } else {
+            tokens.bg_surface
+        },
+    );
+    painter.rect_stroke(
+        pill_rect,
+        metrics::RADIUS_MD,
+        Stroke::new(
+            1.0,
+            if hovered {
+                tokens.border_focus
+            } else {
+                tokens.border_subtle
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+
+    let shortcut_label = config.keybindings.command_palette.trim();
+    let placeholder_rect = pill_rect.shrink2(Vec2::new(10.0, 2.0));
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        UiIcon::Search.as_str(),
+        0.0,
+        egui::TextFormat {
+            font_id: egui::FontId::new(12.5, crate::icons::lucide_font_family()),
+            color: tokens.text_muted,
+            valign: egui::Align::Center,
+            ..Default::default()
+        },
+    );
+    job.append(
+        "  Search workspaces, run action... ",
+        0.0,
+        egui::TextFormat {
+            font_id: egui::FontId::proportional(12.0),
+            color: tokens.text_muted,
+            valign: egui::Align::Center,
+            ..Default::default()
+        },
+    );
+    let galley = painter.layout_job(job);
+    painter.galley(
+        Pos2::new(
+            placeholder_rect.min.x,
+            placeholder_rect.center().y - galley.size().y * 0.5,
+        ),
+        galley,
+        tokens.text_muted,
+    );
+    if !shortcut_label.is_empty() {
+        painter.text(
+            Pos2::new(placeholder_rect.max.x, placeholder_rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            shortcut_label,
+            egui::FontId::proportional(11.0),
+            tokens.text_muted,
+        );
+    }
+
+    if pill_resp.clicked() {
+        action = Some(ToolbarAction::OpenCommandPalette);
+    }
+
+    action
 }
 
 /// Render the Guided Mode top utility toolbar above the tab strip.
