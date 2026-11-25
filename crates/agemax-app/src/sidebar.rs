@@ -172,11 +172,17 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                                 .file_name()
                                 .map(|f| f.to_string_lossy().to_string())
                                 .unwrap_or_else(|| ws.cwd.to_string_lossy().to_string());
-                            ui.label(
-                                egui::RichText::new(folder_name)
-                                    .size(10.0)
-                                    .color(Color32::from_rgb(110, 115, 130)),
-                            );
+                            ui.horizontal(|ui| {
+                                let subtitle = match ws.backend.short_badge() {
+                                    Some(badge) => format!("[{badge}]"),
+                                    None => folder_name,
+                                };
+                                ui.label(
+                                    egui::RichText::new(subtitle)
+                                        .size(10.0)
+                                        .color(Color32::from_rgb(110, 115, 130)),
+                                );
+                            });
 
                             if let Some(snippet) = &meta.latest_snippet {
                                 ui.label(

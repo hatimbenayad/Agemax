@@ -99,6 +99,41 @@ impl LayoutTree {
         Self::Leaf(pane_id)
     }
 
+    /// Build a balanced split layout grid for multi-agent team orchestration (Unit 7 §C).
+    pub fn create_team_grid(coordinator: PaneId, workers: &[PaneId]) -> Self {
+        if workers.is_empty() {
+            return Self::Leaf(coordinator);
+        }
+
+        fn balanced_workers(slice: &[PaneId], depth: usize) -> LayoutTree {
+            match slice.len() {
+                0 => unreachable!("non-empty slice checked by caller"),
+                1 => LayoutTree::Leaf(slice[0]),
+                _ => {
+                    let mid = slice.len() / 2;
+                    let dir = if depth.is_multiple_of(2) {
+                        SplitDirection::Vertical
+                    } else {
+                        SplitDirection::Horizontal
+                    };
+                    LayoutTree::Split {
+                        direction: dir,
+                        ratio: 0.5,
+                        first: Box::new(balanced_workers(&slice[..mid], depth + 1)),
+                        second: Box::new(balanced_workers(&slice[mid..], depth + 1)),
+                    }
+                }
+            }
+        }
+
+        Self::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.42,
+            first: Box::new(Self::Leaf(coordinator)),
+            second: Box::new(balanced_workers(workers, 0)),
+        }
+    }
+
     pub fn panes(&self) -> Vec<PaneId> {
         let mut list = Vec::new();
         self.collect_panes(&mut list);

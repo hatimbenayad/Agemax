@@ -92,6 +92,32 @@ enum Commands {
         #[arg(short, long, help = "Directory to focus or open as a workspace")]
         cwd: Option<String>,
     },
+
+    #[command(subcommand, about = "Control embedded WebView2 browser preview panes")]
+    Browser(BrowserCommands),
+}
+
+#[derive(Subcommand, Debug)]
+enum BrowserCommands {
+    #[command(about = "Open a URL in a browser preview pane")]
+    Open {
+        #[arg(help = "URL to navigate to")]
+        url: String,
+        #[arg(short, long, help = "Optional pane UUID to reuse/target")]
+        pane: Option<String>,
+    },
+    #[command(about = "Capture a PNG screenshot of a browser preview pane")]
+    Screenshot {
+        #[arg(short, long, help = "Target browser pane UUID (defaults to active)")]
+        pane: Option<String>,
+    },
+    #[command(about = "Evaluate JavaScript inside a browser preview pane")]
+    Eval {
+        #[arg(help = "JavaScript expression or statements")]
+        script: String,
+        #[arg(short, long, help = "Target browser pane UUID (defaults to active)")]
+        pane: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -255,6 +281,35 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("Failed to connect to Age Max on {pipe_name}"))?;
             println!("{}", serde_json::to_string_pretty(&res)?);
         }
+        Commands::Browser(cmd) => match cmd {
+            BrowserCommands::Open { url, pane } => {
+                let res = client
+                    .call(
+                        "browser.open",
+                        serde_json::json!({ "url": url, "pane_id": pane }),
+                    )
+                    .await
+                    .with_context(|| format!("Failed to connect to Age Max on {pipe_name}"))?;
+                println!("{}", serde_json::to_string_pretty(&res)?);
+            }
+            BrowserCommands::Screenshot { pane } => {
+                let res = client
+                    .call("browser.screenshot", serde_json::json!({ "pane_id": pane }))
+                    .await
+                    .with_context(|| format!("Failed to connect to Age Max on {pipe_name}"))?;
+                println!("{}", serde_json::to_string_pretty(&res)?);
+            }
+            BrowserCommands::Eval { script, pane } => {
+                let res = client
+                    .call(
+                        "browser.eval",
+                        serde_json::json!({ "script": script, "pane_id": pane }),
+                    )
+                    .await
+                    .with_context(|| format!("Failed to connect to Age Max on {pipe_name}"))?;
+                println!("{}", serde_json::to_string_pretty(&res)?);
+            }
+        },
     }
 
     Ok(())
