@@ -2521,9 +2521,15 @@ impl eframe::App for AgeMaxApp {
 
                 let show_hints = self.config.general.effective_show_shortcut_hints();
                 let tab_action = if let Some(ws) = self.workspaces.get(active_ws_idx) {
+                    let tab_statuses: Vec<AgentStatus> = ws
+                        .tabs
+                        .iter()
+                        .map(|t| aggregate_tab_status(t, &self.pane_status))
+                        .collect();
                     render_tab_bar(
                         ui,
                         &ws.tabs,
+                        &tab_statuses,
                         ws.active_tab_index,
                         show_hints,
                         &resolved_theme,
@@ -3610,6 +3616,25 @@ impl eframe::App for AgeMaxApp {
         }
         self.any_pane_animating = any_animating;
     }
+}
+
+fn aggregate_tab_status(tab: &Tab, pane_status: &HashMap<PaneId, AgentStatus>) -> AgentStatus {
+    let mut best = AgentStatus::Idle;
+    for pid in tab.layout.panes() {
+        let st = pane_status.get(&pid).copied().unwrap_or(AgentStatus::Idle);
+        match st {
+            AgentStatus::WaitingForInput => return AgentStatus::WaitingForInput,
+            AgentStatus::Failed => best = AgentStatus::Failed,
+            AgentStatus::Working | AgentStatus::Thinking | AgentStatus::RunningTool
+                if best != AgentStatus::Failed =>
+            {
+                best = st;
+            }
+            AgentStatus::Done if best == AgentStatus::Idle => best = AgentStatus::Done,
+            _ => {}
+        }
+    }
+    best
 }
 
 fn compute_terminal_grid_size(
