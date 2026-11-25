@@ -3568,7 +3568,9 @@ fn compute_terminal_grid_size(
     let target_w = (pane_width - (pad * 2.0)).max(50.0);
     let target_h = ((pane_height - header_height).max(40.0) - (pad * 2.0)).max(32.0);
     let cols = (target_w / char_width.max(1.0)).floor().clamp(2.0, 500.0) as u16;
-    let rows = (target_h / char_height.max(1.0)).floor().clamp(2.0, 200.0) as u16;
+    let rows = (target_h / char_height.max(1.0))
+        .floor()
+        .clamp(2.0, 200.0) as u16;
     TerminalSize::new(cols, rows)
 }
 
