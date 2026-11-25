@@ -2303,11 +2303,6 @@ impl eframe::App for AgeMaxApp {
         }
 
         // 1. Left Workspace Sidebar (full height between header and bottom status bar)
-        let sidebar_width = if self.is_sidebar_collapsed {
-            48.0
-        } else {
-            220.0
-        };
         let sidebar_meta: Vec<SidebarWorkspaceMeta> = self
             .workspaces
             .iter()
@@ -2332,24 +2327,31 @@ impl eframe::App for AgeMaxApp {
             })
             .collect();
 
-        let sidebar_action = egui::Panel::left("workspace_sidebar")
-            .exact_size(sidebar_width)
-            .resizable(false)
-            .show_separator_line(false)
-            .frame(egui::Frame::NONE)
-            .show(ui, |ui| {
-                render_sidebar(
-                    ui,
-                    SidebarProps {
-                        workspaces: &self.workspaces,
-                        active_index: self.active_workspace_index,
-                        is_collapsed: self.is_sidebar_collapsed,
-                        meta: &sidebar_meta,
-                        theme: &resolved_theme,
-                    },
-                )
-            })
-            .inner;
+        let sidebar_props = SidebarProps {
+            workspaces: &self.workspaces,
+            active_index: self.active_workspace_index,
+            is_collapsed: self.is_sidebar_collapsed,
+            meta: &sidebar_meta,
+            theme: &resolved_theme,
+        };
+        let sidebar_action = if self.is_sidebar_collapsed {
+            egui::Panel::left("workspace_sidebar_collapsed")
+                .exact_size(52.0)
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| render_sidebar(ui, sidebar_props))
+                .inner
+        } else {
+            egui::Panel::left("workspace_sidebar_expanded")
+                .default_size(228.0)
+                .size_range(180.0..=340.0)
+                .resizable(true)
+                .show_separator_line(false)
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| render_sidebar(ui, sidebar_props))
+                .inner
+        };
 
         if let Some(action) = sidebar_action {
             match action {
@@ -2372,6 +2374,10 @@ impl eframe::App for AgeMaxApp {
                 }
                 SidebarAction::OpenViewSettings => {
                     self.settings_modal.open(&self.config);
+                }
+                SidebarAction::OpenShortcuts => {
+                    self.settings_modal
+                        .open_tab(&self.config, SettingsTab::Shortcuts);
                 }
             }
         }
