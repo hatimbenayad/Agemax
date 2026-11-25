@@ -79,7 +79,7 @@ use stretch_panels::{
     TeamLauncherModal,
 };
 use tab_bar::{render_tab_bar, TabBarAction};
-use telemetry::{infer_pty_tool_hint, GitStatsPoller, PaneTelemetry};
+use telemetry::{infer_pty_tool_hint, GitStatsPoller, PaneTelemetry, SystemStats, SystemStatsPoller};
 use uuid::Uuid;
 use visual_alive::{PaneRectAnimator, PaneVisualAnimator};
 use webview_pane::{render_browser_pane, BrowserPaneAction, WebViewSurface};
@@ -191,6 +191,8 @@ pub struct AgeMaxApp {
     agent_conversation_ids: HashMap<PaneId, String>,
     pane_telemetry: HashMap<PaneId, PaneTelemetry>,
     git_stats_poller: GitStatsPoller,
+    system_stats_poller: SystemStatsPoller,
+    system_stats: Option<SystemStats>,
     notification_store: NotificationStore,
     activity_feed: ActivityFeed,
     notification_service: Box<dyn NotificationService>,
@@ -332,6 +334,8 @@ impl AgeMaxApp {
             agent_conversation_ids: HashMap::new(),
             pane_telemetry: HashMap::new(),
             git_stats_poller: GitStatsPoller::spawn(cc.map(|c| c.egui_ctx.clone())),
+            system_stats_poller: SystemStatsPoller::spawn(cc.map(|c| c.egui_ctx.clone())),
+            system_stats: None,
             notification_store,
             activity_feed: ActivityFeed::new(),
             notification_service: Box::new(PlatformNotificationService::new()),
@@ -2061,8 +2065,23 @@ impl eframe::App for AgeMaxApp {
             .filter(|w| matches!(w.backend, WorkspaceBackend::Local))
             .map(|w| (w.id, w.cwd.clone()))
             .collect();
-        self.git_stats_poller
-            .poll_and_maybe_refresh(|| ws_git_targets, now_instant);
+        if self
+            .git_stats_poller
+            .poll_and_maybe_refresh(|| ws_git_targets, now_instant)
+        {
+            for ws in &mut self.workspaces {
+                if matches!(ws.backend, WorkspaceBackend::Local) {
+                    if let Some(branch) = self.git_stats_poller.branches.get(&ws.id) {
+                        if ws.git_branch != *branch {
+                            ws.git_branch = branch.clone();
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(sys) = self.system_stats_poller.poll() {
+            self.system_stats = Some(sys);
+        }
 
         let mut dirty = false;
         let mut acp_events_to_record: Vec<(PaneId, AcpEvent, AgentStatus)> = Vec::new();
@@ -2334,6 +2353,8 @@ impl eframe::App for AgeMaxApp {
                             git_branch: branch,
                             folder_name: &folder_name,
                             running_agents,
+                            cpu_percent: self.system_stats.map(|s| s.cpu_percent),
+                            ram_percent: self.system_stats.map(|s| s.ram_percent),
                             font_size: self.font_size,
                             command_palette_shortcut: &self.config.keybindings.command_palette,
                             resolved_theme: &resolved_theme,

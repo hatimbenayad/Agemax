@@ -3,12 +3,14 @@
 use crate::icons::{icon_rich, UiIcon};
 use crate::ui_tokens::{metrics, UiTokens};
 use agemax_config::theme::ResolvedTheme;
-use eframe::egui::{self, Color32, Pos2, Stroke, Vec2};
+use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
 
 pub struct StatusBarProps<'a> {
     pub git_branch: Option<&'a str>,
     pub folder_name: &'a str,
     pub running_agents: usize,
+    pub cpu_percent: Option<u8>,
+    pub ram_percent: Option<u8>,
     pub font_size: f32,
     pub command_palette_shortcut: &'a str,
     pub resolved_theme: &'a ResolvedTheme,
@@ -101,6 +103,16 @@ pub fn render_status_bar(ui: &mut egui::Ui, props: StatusBarProps<'_>) -> Option
                         .size(11.0)
                         .color(tokens.text_muted),
                 );
+
+                if let Some(ram) = props.ram_percent {
+                    status_divider(ui, &tokens);
+                    render_meter_pill(ui, &tokens, UiIcon::MemoryStick, "RAM", ram);
+                }
+
+                if let Some(cpu) = props.cpu_percent {
+                    status_divider(ui, &tokens);
+                    render_meter_pill(ui, &tokens, UiIcon::Cpu, "CPU", cpu);
+                }
             });
         });
     });
@@ -123,6 +135,29 @@ pub fn format_running_agents_label(count: usize) -> String {
     } else {
         format!("{count} agents running")
     }
+}
+
+fn render_meter_pill(ui: &mut egui::Ui, tokens: &UiTokens, icon: UiIcon, label: &str, percent: u8) {
+    let clamped = percent.min(100);
+    // right_to_left container reverses child insertion order, so emit rightmost elements first.
+    ui.label(
+        egui::RichText::new(format!("{clamped}%"))
+            .size(11.0)
+            .color(tokens.text_primary),
+    );
+    let (track_rect, _) = ui.allocate_exact_size(Vec2::new(38.0, 5.0), egui::Sense::hover());
+    ui.painter()
+        .rect_filled(track_rect, 2.5, tokens.bg_elevated);
+    let fill_w = (track_rect.width() * (clamped as f32 / 100.0)).max(2.0);
+    let fill_rect = Rect::from_min_size(track_rect.min, Vec2::new(fill_w, track_rect.height()));
+    ui.painter()
+        .rect_filled(fill_rect, 2.5, tokens.accent_primary);
+    ui.label(
+        egui::RichText::new(label)
+            .size(11.0)
+            .color(tokens.text_muted),
+    );
+    ui.label(icon_rich(icon, 11.5, Some(tokens.text_muted)));
 }
 
 fn status_divider(ui: &mut egui::Ui, tokens: &UiTokens) {
