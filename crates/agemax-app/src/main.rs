@@ -986,11 +986,8 @@ impl AgeMaxApp {
         }
 
         let pane_id = PaneId::new();
-        let mut ws =
-            Workspace::with_backend(req.name, req.cwd.clone(), pane_id, req.backend.clone());
-        if matches!(req.backend, WorkspaceBackend::Local) {
-            ws.git_branch = detect_git_branch(&req.cwd);
-        }
+        let ws = Workspace::with_backend(req.name, req.cwd.clone(), pane_id, req.backend.clone());
+        // `git_branch` is populated asynchronously by `GitStatsPoller` to avoid blocking the UI thread.
 
         let surface = self
             .spawn_surface_for_backend(
@@ -1017,6 +1014,8 @@ impl AgeMaxApp {
         if req.launch_agy {
             self.launch_agy_in_pane(pane_id);
         }
+        self.show_welcome_view = false;
+        self.show_grid_view = false;
         Some(ws_id)
     }
 
@@ -3677,10 +3676,11 @@ impl eframe::App for AgeMaxApp {
         }
 
         // 5. New Workspace Modal (Local / WSL / SSH Backend)
-        if let Some(ws_req) = self
-            .new_workspace_modal
-            .show(ui.ctx(), self.config.general.allowed_root_dir.as_deref())
-        {
+        if let Some(ws_req) = self.new_workspace_modal.show(
+            ui.ctx(),
+            self.config.general.allowed_root_dir.as_deref(),
+            self.host_hwnd,
+        ) {
             let _ = self.create_workspace_with_backend(ws_req);
         }
 

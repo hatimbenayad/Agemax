@@ -1,4 +1,4 @@
-use crate::folder_picker::spawn_folder_picker_async;
+use crate::folder_picker::spawn_folder_picker_with_owner;
 use crate::icons::{icon_label, icon_rich, icon_text, UiIcon};
 use crate::ui_tokens::{metrics, UiTokens};
 use crate::visual_alive::render_agent_mascot;
@@ -81,10 +81,14 @@ pub struct NewWorkspaceModal {
     wsl_distro: String,
     wsl_linux_cwd: String,
     detected_wsl_distros: Vec<String>,
+    wsl_rx: Option<Receiver<Vec<String>>>,
+    wsl_detect_started: bool,
     ssh_target: String,
     ssh_port: String,
     ssh_remote_dir: String,
     picker_rx: Option<Receiver<Option<PathBuf>>>,
+    cached_path_error: Option<String>,
+    last_validated_root: Option<PathBuf>,
 }
 
 impl Default for NewWorkspaceModal {
@@ -105,10 +109,14 @@ impl NewWorkspaceModal {
             wsl_distro: String::new(),
             wsl_linux_cwd: "~".to_string(),
             detected_wsl_distros: Vec::new(),
+            wsl_rx: None,
+            wsl_detect_started: false,
             ssh_target: String::new(),
             ssh_port: String::new(),
             ssh_remote_dir: "~".to_string(),
             picker_rx: None,
+            cached_path_error: None,
+            last_validated_root: None,
         }
     }
 
@@ -127,22 +135,71 @@ impl NewWorkspaceModal {
             .unwrap_or_else(|| format!("Workspace {}", default_index));
         self.name_manually_edited = false;
         self.launch_agy = false;
-        self.detected_wsl_distros = detect_wsl_distros();
-        if self.wsl_distro.is_empty() {
-            if let Some(first) = self.detected_wsl_distros.first() {
-                self.wsl_distro = first.clone();
-            }
-        }
+        self.detected_wsl_distros.clear();
+        self.wsl_rx = None;
+        self.wsl_detect_started = false;
         self.picker_rx = None;
+        self.revalidate_local_path(allowed_root);
     }
 
     pub fn close(&mut self) {
         self.is_open = false;
         self.picker_rx = None;
+        self.wsl_rx = None;
+    }
+
+    /// Revalidate `path_input` against `allowed_root` and cache the error string.
+    pub fn revalidate_local_path(&mut self, allowed_root: Option<&Path>) {
+        self.last_validated_root = allowed_root.map(Path::to_path_buf);
+        self.cached_path_error =
+            validate_workspace_path(&PathBuf::from(self.path_input.trim()), allowed_root)
+                .err()
+                .map(|e| e.to_string());
+    }
+
+    /// Revalidate only when `allowed_root` changed since the last check.
+    pub fn sync_allowed_root_validation(&mut self, allowed_root: Option<&Path>) {
+        let target_root = allowed_root.map(Path::to_path_buf);
+        if self.last_validated_root != target_root {
+            self.revalidate_local_path(allowed_root);
+        }
+    }
+
+    /// Poll pending async WSL distro detection.
+    pub fn poll_wsl(&mut self) {
+        if let Some(rx) = &self.wsl_rx {
+            if let Ok(distros) = rx.try_recv() {
+                self.detected_wsl_distros = distros;
+                if self.wsl_distro.is_empty() {
+                    if let Some(first) = self.detected_wsl_distros.first() {
+                        self.wsl_distro = first.clone();
+                    }
+                }
+                self.wsl_rx = None;
+            }
+        }
+    }
+
+    fn ensure_wsl_detection_started(&mut self, ctx: &egui::Context) {
+        if self.wsl_detect_started {
+            return;
+        }
+        self.wsl_detect_started = true;
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let ctx_clone = ctx.clone();
+        std::thread::Builder::new()
+            .name("agemax-wsl-detect".to_string())
+            .spawn(move || {
+                let distros = detect_wsl_distros();
+                let _ = tx.send(distros);
+                ctx_clone.request_repaint();
+            })
+            .ok();
+        self.wsl_rx = Some(rx);
     }
 
     /// Poll pending async folder selection from Windows COM dialog.
-    pub fn poll_picker(&mut self) {
+    pub fn poll_picker(&mut self, allowed_root: Option<&Path>) {
         if let Some(rx) = &self.picker_rx {
             if let Ok(result) = rx.try_recv() {
                 if let Some(chosen_path) = result {
@@ -155,6 +212,7 @@ impl NewWorkspaceModal {
                             }
                         }
                     }
+                    self.revalidate_local_path(allowed_root);
                 }
                 self.picker_rx = None;
             }
@@ -166,11 +224,17 @@ impl NewWorkspaceModal {
         &mut self,
         ctx: &egui::Context,
         allowed_root: Option<&Path>,
+        host_hwnd: Option<isize>,
     ) -> Option<NewWorkspaceRequest> {
         if !self.is_open {
             return None;
         }
-        self.poll_picker();
+        self.poll_picker(allowed_root);
+        self.poll_wsl();
+        self.sync_allowed_root_validation(allowed_root);
+        if self.backend_tab == BackendTab::Wsl {
+            self.ensure_wsl_detection_started(ctx);
+        }
 
         let mut submitted = None;
         let mut should_close = false;
@@ -243,8 +307,6 @@ impl NewWorkspaceModal {
                     ui.separator();
                     ui.add_space(6.0);
 
-                    let mut local_path_error: Option<String> = None;
-
                     match self.backend_tab {
                         BackendTab::Local => {
                             ui.label(
@@ -256,7 +318,9 @@ impl NewWorkspaceModal {
                                 let edit = egui::TextEdit::singleline(&mut self.path_input)
                                     .desired_width(355.0)
                                     .text_color(Color32::WHITE);
-                                ui.add(edit);
+                                if ui.add(edit).changed() {
+                                    self.revalidate_local_path(allowed_root);
+                                }
 
                                 let is_browsing = self.picker_rx.is_some();
                                 let btn_text = if is_browsing { "Choosing..." } else { "Browse..." };
@@ -269,17 +333,14 @@ impl NewWorkspaceModal {
                                         })
                                         .map(Path::to_path_buf)
                                         .unwrap_or(candidate);
-                                    self.picker_rx =
-                                        Some(spawn_folder_picker_async(Some(initial), ctx.clone()));
+                                    self.picker_rx = Some(spawn_folder_picker_with_owner(
+                                        Some(initial),
+                                        host_hwnd,
+                                        ctx.clone(),
+                                    ));
                                 }
                             });
-                            if let Err(err) = validate_workspace_path(
-                                &PathBuf::from(self.path_input.trim()),
-                                allowed_root,
-                            ) {
-                                local_path_error = Some(err.to_string());
-                            }
-                            if let Some(ref err_msg) = local_path_error {
+                            if let Some(ref err_msg) = self.cached_path_error {
                                 ui.label(icon_label(
                                     UiIcon::AlertTriangle,
                                     err_msg,
@@ -382,7 +443,7 @@ impl NewWorkspaceModal {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let valid_name = !self.name.trim().is_empty();
                         let valid_backend = match self.backend_tab {
-                            BackendTab::Local => local_path_error.is_none(),
+                            BackendTab::Local => self.cached_path_error.is_none(),
                             BackendTab::Wsl => true,
                             BackendTab::Ssh => !self.ssh_target.trim().is_empty(),
                         };
@@ -1521,4 +1582,102 @@ pub(crate) fn modal_frame() -> egui::Frame {
         .corner_radius(8.0)
         .stroke(Stroke::new(1.5, Color32::from_rgb(70, 110, 200)))
         .inner_margin(14.0)
+}
+
+#[cfg(test)]
+impl NewWorkspaceModal {
+    pub(crate) fn wsl_detect_started_for_test(&self) -> bool {
+        self.wsl_detect_started
+    }
+
+    pub(crate) fn detected_wsl_distros_for_test(&self) -> &[String] {
+        &self.detected_wsl_distros
+    }
+
+    pub(crate) fn cached_path_error_for_test(&self) -> Option<&str> {
+        self.cached_path_error.as_deref()
+    }
+
+    pub(crate) fn set_wsl_rx_for_test(&mut self, rx: Receiver<Vec<String>>) {
+        self.wsl_rx = Some(rx);
+    }
+
+    pub(crate) fn wsl_distro_for_test(&self) -> &str {
+        &self.wsl_distro
+    }
+
+    pub(crate) fn has_pending_wsl_rx_for_test(&self) -> bool {
+        self.wsl_rx.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NewWorkspaceModal;
+
+    #[test]
+    fn test_new_workspace_modal_open_defers_wsl_and_caches_validation() {
+        let temp = std::env::temp_dir().join("agemax_test_modal_14c");
+        let _ = std::fs::create_dir_all(&temp);
+
+        let mut modal = NewWorkspaceModal::new();
+        modal.open(&temp, 1, None);
+
+        // WSL detection must not run synchronously on open().
+        assert!(!modal.wsl_detect_started_for_test());
+        assert!(modal.detected_wsl_distros_for_test().is_empty());
+
+        // Valid path should cache no error on open().
+        assert!(modal.cached_path_error_for_test().is_none());
+
+        // Changing path_input without revalidating leaves cached result untouched,
+        // and explicit revalidation updates it for an outside path.
+        let outside = std::env::temp_dir().join("agemax_test_modal_14c_outside");
+        let _ = std::fs::create_dir_all(&outside);
+        modal.path_input = outside.to_string_lossy().to_string();
+        assert!(modal.cached_path_error_for_test().is_none());
+
+        modal.revalidate_local_path(Some(&temp));
+        assert!(modal.cached_path_error_for_test().is_some());
+
+        let _ = std::fs::remove_dir_all(&temp);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn test_new_workspace_modal_poll_wsl_populates_default_distro() {
+        let mut modal = NewWorkspaceModal::new();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        modal.set_wsl_rx_for_test(rx);
+        tx.send(vec!["Ubuntu".to_string(), "Debian".to_string()])
+            .expect("send test distros");
+
+        modal.poll_wsl();
+
+        assert_eq!(
+            modal.detected_wsl_distros_for_test(),
+            &["Ubuntu".to_string(), "Debian".to_string()]
+        );
+        assert_eq!(modal.wsl_distro_for_test(), "Ubuntu");
+        assert!(!modal.has_pending_wsl_rx_for_test());
+    }
+
+    #[test]
+    fn test_new_workspace_modal_allowed_root_change_triggers_revalidation() {
+        let root_a = std::env::temp_dir().join("agemax_test_modal_14c_ra");
+        let root_b = std::env::temp_dir().join("agemax_test_modal_14c_rb");
+        let _ = std::fs::create_dir_all(&root_a);
+        let _ = std::fs::create_dir_all(&root_b);
+
+        let mut modal = NewWorkspaceModal::new();
+        modal.open(&root_a, 1, Some(&root_a));
+        assert!(modal.cached_path_error_for_test().is_none());
+
+        // Switching allowed_root should invalidate and detect root_a is outside root_b.
+        modal.sync_allowed_root_validation(Some(&root_b));
+        assert!(modal.cached_path_error_for_test().is_some());
+
+        let _ = std::fs::remove_dir_all(&root_a);
+        let _ = std::fs::remove_dir_all(&root_b);
+    }
 }
