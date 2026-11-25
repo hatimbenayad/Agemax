@@ -177,6 +177,7 @@ Age Max follows clean-room, Spec-Driven Development under [`specs/`](specs):
 
 ---
 
-## License
+## License & Credits
 
-Dual-licensed under **`MIT OR Apache-2.0`**. See [`LICENSE`](LICENSE) for details. Dependency licenses are enforced in CI via [`deny.toml`](deny.toml).
+* **Age Max**: Dual-licensed under **`MIT OR Apache-2.0`**. See [`LICENSE`](LICENSE) for details. Dependency licenses are enforced in CI via [`deny.toml`](deny.toml).
+* **Icons**: Embedded vector icon font provided by [Lucide](https://lucide.dev/), licensed under the **ISC License**. See [`assets/fonts/LICENSE-LUCIDE.txt`](assets/fonts/LICENSE-LUCIDE.txt) for full terms.
