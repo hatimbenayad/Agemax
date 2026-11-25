@@ -175,3 +175,10 @@ This document specifies the testable requirements for **Age Max**. Every require
   - Pane open/close/resize layout changes MUST support smooth visual container easing (~140 ms) while debouncing ConPTY resize ioctls and WebView2 bounds updates until layout stabilizes.
   - Settings MUST offer an opt-in **Windows 11 Mica Backdrop** (`enable_mica_backdrop`) via DWM with opaque fallback on Windows 10.
   - Shortcuts MUST retain safe `Ctrl+Shift+P` default (`REQ-054` terminal `\x0b` protection) while offering an optional opt-in `Ctrl+K` Command Palette preset in Settings.
+
+---
+
+## 11. Session Restore Hardening & Workspace Modes (Unit 14+)
+
+### Unit 14a: Per-Pane Session Restore Path Validation
+- **REQ-090**: On session restore (`restore_session_snapshot`), Age Max MUST validate every `PaneSnapshot.cwd` for local workspaces against `GeneralConfig.allowed_root_dir` via `validate_workspace_path` (normalizing `..` traversal and canonical paths). If a saved pane directory is outside `allowed_root_dir`, Age Max MUST fall back to the validated workspace directory and surface a warning notification in the Alerts panel.

@@ -781,6 +781,7 @@ impl AgeMaxApp {
         let mut new_statuses = HashMap::new();
         let mut new_conv_ids = HashMap::new();
         let mut resume_targets = Vec::new();
+        let mut blocked_pane_warnings: Vec<(WorkspaceId, PaneId, String)> = Vec::new();
 
         for ws_snap in snapshot.workspaces {
             let ws_dir = if ws_snap.cwd.exists() {
@@ -817,10 +818,19 @@ impl AgeMaxApp {
                 } else {
                     for pid in &pane_ids {
                         let pane_snap = tab_snap.panes.iter().find(|p| p.id == pid.0);
-                        let p_dir = pane_snap
-                            .map(|p| p.cwd.clone())
-                            .filter(|d| d.exists())
-                            .unwrap_or_else(|| ws_dir.clone());
+                        let allowed_root = if matches!(ws_snap.backend, WorkspaceBackend::Local) {
+                            self.config.general.allowed_root_dir.as_deref()
+                        } else {
+                            None
+                        };
+                        let (p_dir, blocked_reason) = resolve_restored_pane_cwd(
+                            pane_snap.map(|p| p.cwd.as_path()),
+                            &ws_dir,
+                            allowed_root,
+                        );
+                        if let Some(reason) = blocked_reason {
+                            blocked_pane_warnings.push((WorkspaceId(ws_snap.id), *pid, reason));
+                        }
                         if let Ok(surf) = self.spawn_surface_for_backend(
                             &ws_snap.backend,
                             TerminalSize::new(80, 24),
@@ -901,6 +911,20 @@ impl AgeMaxApp {
         self.agent_conversation_ids = new_conv_ids;
         self.pending_restore = None;
         self.text_selection = None;
+
+        if !blocked_pane_warnings.is_empty() {
+            for (ws_id, pid, reason) in blocked_pane_warnings {
+                self.notification_store.notify(
+                    ws_id,
+                    pid,
+                    AgentStatus::Failed,
+                    format!(
+                        "Restored pane folder blocked ({reason}) — opened workspace folder instead."
+                    ),
+                );
+            }
+            self.show_notifications_panel = true;
+        }
 
         for pid in resume_targets {
             self.resume_agent_in_pane(pid);
@@ -3864,9 +3888,27 @@ fn egui_key_to_code(key: Key) -> Option<KeyCode> {
     }
 }
 
+/// Validate and resolve a restored pane's working directory against `allowed_root` (`REQ-090`).
+/// Falls back to `ws_dir` with a warning message if `pane_cwd` is outside `allowed_root`.
+fn resolve_restored_pane_cwd(
+    pane_cwd: Option<&Path>,
+    ws_dir: &Path,
+    allowed_root: Option<&Path>,
+) -> (PathBuf, Option<String>) {
+    let Some(candidate) = pane_cwd.filter(|d| d.exists()) else {
+        return (ws_dir.to_path_buf(), None);
+    };
+    match validate_workspace_path(candidate, allowed_root) {
+        Ok(safe_dir) => (safe_dir, None),
+        Err(err) => (ws_dir.to_path_buf(), Some(err.to_string())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::compute_terminal_grid_size;
+    use super::{compute_terminal_grid_size, resolve_restored_pane_cwd};
+    use agemax_config::safety::resolve_normalized_path;
+    use std::path::PathBuf;
 
     #[test]
     fn test_compute_terminal_grid_size_scales_with_viewport() {
@@ -3876,5 +3918,53 @@ mod tests {
         assert!(large.rows > small.rows);
         assert!(small.cols >= 100);
         assert!(small.rows >= 28);
+    }
+
+    #[test]
+    fn test_resolve_restored_pane_cwd_cases() {
+        let base = std::env::temp_dir().join(format!("agemax_u14a_{}", uuid::Uuid::new_v4()));
+        let allowed_root = base.join("safe_root");
+        let inside_ws = allowed_root.join("ws");
+        let inside_sub = inside_ws.join("sub");
+        let outside_dir = base.join("outside_secret");
+        std::fs::create_dir_all(&inside_sub).expect("create inside_sub");
+        std::fs::create_dir_all(&outside_dir).expect("create outside_dir");
+
+        // 1. Inside allowed root -> accepted
+        let (resolved, blocked) =
+            resolve_restored_pane_cwd(Some(&inside_sub), &inside_ws, Some(&allowed_root));
+        assert_eq!(resolved, resolve_normalized_path(&inside_sub));
+        assert!(blocked.is_none());
+
+        // 2. Outside existing directory -> falls back to ws_dir with warning
+        let (resolved, blocked) =
+            resolve_restored_pane_cwd(Some(&outside_dir), &inside_ws, Some(&allowed_root));
+        assert_eq!(resolved, inside_ws);
+        assert!(blocked.is_some());
+
+        // 3. ".." traversal escaping allowed root -> falls back to ws_dir with warning
+        let traversal = inside_sub
+            .join("..")
+            .join("..")
+            .join("..")
+            .join("outside_secret");
+        let (resolved, blocked) =
+            resolve_restored_pane_cwd(Some(&traversal), &inside_ws, Some(&allowed_root));
+        assert_eq!(resolved, inside_ws);
+        assert!(blocked.is_some());
+
+        // 4. No allowed root set -> existing outside directory is permitted
+        let (resolved, blocked) = resolve_restored_pane_cwd(Some(&outside_dir), &inside_ws, None);
+        assert_eq!(resolved, resolve_normalized_path(&outside_dir));
+        assert!(blocked.is_none());
+
+        // 5. Non-existent path -> falls back to ws_dir without security warning
+        let missing = PathBuf::from(&outside_dir).join("does_not_exist");
+        let (resolved, blocked) =
+            resolve_restored_pane_cwd(Some(&missing), &inside_ws, Some(&allowed_root));
+        assert_eq!(resolved, inside_ws);
+        assert!(blocked.is_none());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
