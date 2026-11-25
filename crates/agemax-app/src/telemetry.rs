@@ -112,7 +112,7 @@ pub fn format_elapsed_compact(secs: u64) -> String {
     }
 }
 
-/// Draw a tiny vector bar sparkline with zero heap allocations (`REQ-087`).
+/// Draw a smooth zero-allocation vector polyline sparkline (`REQ-087`).
 pub fn render_sparkline(
     painter: &egui::Painter,
     rect: Rect,
@@ -120,27 +120,25 @@ pub fn render_sparkline(
     accent: Color32,
     base: Color32,
 ) {
-    let max_val = samples.iter().copied().max().unwrap_or(0).max(64) as f32;
-    let bar_w = (rect.width() / SPARKLINE_BUCKETS as f32).max(1.5);
-    let gap = 0.8_f32.min(bar_w * 0.25);
+    let max_val = samples.iter().copied().max().unwrap_or(0);
+    let norm_max = max_val.max(64) as f32;
+    let has_activity = max_val > 0;
+    let line_col = if has_activity { accent } else { base };
+
+    let mut pts = [Pos2::ZERO; SPARKLINE_BUCKETS];
+    let denom = (SPARKLINE_BUCKETS.saturating_sub(1)).max(1) as f32;
+    let usable_h = (rect.height() - 3.0).max(2.0);
+    let baseline_y = rect.max.y - 1.5;
 
     for (i, &val) in samples.iter().enumerate() {
-        let ratio = (val as f32 / max_val).sqrt().clamp(0.0, 1.0);
-        let h = (rect.height() * ratio).max(if val > 0 { 2.0 } else { 1.0 });
-        let x0 = rect.min.x + i as f32 * bar_w;
-        let x1 = (x0 + bar_w - gap).max(x0 + 1.0);
-        let bar_rect = Rect::from_min_max(Pos2::new(x0, rect.max.y - h), Pos2::new(x1, rect.max.y));
-        let col = if val > 0 {
-            Color32::from_rgba_unmultiplied(
-                accent.r(),
-                accent.g(),
-                accent.b(),
-                (110.0 + ratio * 145.0) as u8,
-            )
-        } else {
-            base
-        };
-        painter.rect_filled(bar_rect, 0.8, col);
+        let ratio = (val as f32 / norm_max).sqrt().clamp(0.0, 1.0);
+        let x = rect.min.x + (i as f32 / denom) * rect.width();
+        let y = baseline_y - ratio * usable_h;
+        pts[i] = Pos2::new(x, y);
+    }
+
+    for pair in pts.windows(2) {
+        painter.line_segment([pair[0], pair[1]], egui::Stroke::new(1.5, line_col));
     }
 }
 

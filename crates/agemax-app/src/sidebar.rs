@@ -1,12 +1,12 @@
-use crate::icons::{icon_label, icon_rich, icon_text, status_icon, UiIcon};
+use crate::icons::{icon_label, icon_rich, icon_text, UiIcon};
 use crate::telemetry::{format_elapsed_compact, render_sparkline, SPARKLINE_BUCKETS};
 use crate::ui_tokens::{metrics, UiTokens};
-use crate::visual_alive::ThemeChromeColors;
+use agemax_config::safety::display_clean_path;
 use agemax_config::theme::ResolvedTheme;
 use agemax_core::status::AgentStatus;
 use agemax_core::workspace::Workspace;
 use agemax_term::metadata::GitDiffStat;
-use eframe::egui::{self, Color32, Stroke, Vec2};
+use eframe::egui::{self, Color32, Sense, Stroke, Vec2};
 
 #[derive(Debug, Clone, Default)]
 pub struct SidebarWorkspaceMeta {
@@ -39,7 +39,6 @@ pub enum SidebarAction {
 
 pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarAction> {
     let mut action = None;
-    let chrome = ThemeChromeColors::from_theme(props.theme);
     let tokens = UiTokens::from_theme(props.theme);
 
     let frame = egui::Frame::new()
@@ -105,39 +104,52 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                         let has_unread = meta.unread_count > 0;
 
                         let bg_color = if is_active {
-                            chrome.panel_alt_bg
+                            tokens.bg_elevated
                         } else if has_unread {
-                            Color32::from_rgb(42, 34, 22)
+                            Color32::from_rgb(38, 30, 20)
                         } else {
-                            Color32::TRANSPARENT
+                            tokens.bg_surface
+                        };
+                        let border_stroke = if is_active {
+                            Stroke::new(1.5, tokens.border_focus)
+                        } else if has_unread {
+                            Stroke::new(1.0, Color32::from_rgb(180, 125, 38))
+                        } else {
+                            Stroke::new(1.0, tokens.border_subtle)
                         };
 
-                        let btn_frame = egui::Frame::new()
+                        let card_frame = egui::Frame::new()
                             .fill(bg_color)
-                            .corner_radius(4.0)
-                            .stroke(if is_active {
-                                Stroke::new(1.0, chrome.accent)
-                            } else {
-                                Stroke::NONE
-                            })
-                            .inner_margin(6.0);
+                            .corner_radius(metrics::RADIUS_MD)
+                            .stroke(border_stroke)
+                            .inner_margin(Vec2::new(8.0, 7.0));
 
-                        btn_frame.show(ui, |ui| {
+                        let dot_color = status_dot_color(meta.status, &tokens);
+
+                        card_frame.show(ui, |ui| {
                             if props.is_collapsed {
                                 let first_letter =
                                     ws.name.chars().next().unwrap_or('W').to_string();
                                 let text_color = if is_active {
-                                    Color32::WHITE
-                                } else if has_unread {
-                                    Color32::from_rgb(245, 175, 45)
+                                    tokens.text_primary
                                 } else {
-                                    Color32::GRAY
+                                    tokens.text_muted
                                 };
-                                let resp = ui.button(
-                                    egui::RichText::new(first_letter)
-                                        .color(text_color)
-                                        .size(14.0)
-                                        .strong(),
+                                let resp = ui.add(
+                                    egui::Button::new(
+                                        egui::RichText::new(first_letter)
+                                            .color(text_color)
+                                            .size(13.5)
+                                            .strong(),
+                                    )
+                                    .fill(Color32::TRANSPARENT)
+                                    .stroke(Stroke::NONE)
+                                    .min_size(Vec2::new(26.0, 26.0)),
+                                );
+                                ui.painter().circle_filled(
+                                    egui::Pos2::new(resp.rect.max.x - 3.0, resp.rect.min.y + 4.0),
+                                    3.0,
+                                    dot_color,
                                 );
                                 if resp.clicked() {
                                     action = Some(SidebarAction::SelectWorkspace(idx));
@@ -149,35 +161,44 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                                 };
                                 resp.on_hover_text(tooltip);
                             } else {
+                                // Row 1: Colored status dot + Bold name + optional timer/unread + rename/close
                                 ui.horizontal(|ui| {
-                                    let label_color = if is_active {
-                                        chrome.text_primary
-                                    } else if has_unread {
-                                        Color32::from_rgb(245, 175, 45)
-                                    } else {
-                                        chrome.text_muted
-                                    };
-                                    let label_text = egui::RichText::new(&ws.name)
-                                        .color(label_color)
-                                        .size(13.0)
-                                        .strong();
-                                    if ui.link(label_text).clicked() {
+                                    ui.spacing_mut().item_spacing.x = 5.0;
+                                    let (dot_rect, dot_resp) = ui
+                                        .allocate_exact_size(Vec2::new(8.0, 14.0), Sense::click());
+                                    ui.painter()
+                                        .circle_filled(dot_rect.center(), 3.8, dot_color);
+                                    if dot_resp.clicked() {
                                         action = Some(SidebarAction::SelectWorkspace(idx));
                                     }
 
-                                    if let Some(status) = meta.status {
-                                        ui.label(icon_rich(
-                                            status_icon(status),
-                                            11.0,
-                                            Some(chrome.text_muted),
-                                        ));
+                                    let label_color = if has_unread {
+                                        Color32::from_rgb(251, 191, 36)
+                                    } else {
+                                        tokens.text_primary
+                                    };
+                                    let name_resp = ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(&ws.name)
+                                                .color(label_color)
+                                                .size(12.5)
+                                                .strong(),
+                                        )
+                                        .truncate()
+                                        .sense(Sense::click()),
+                                    );
+                                    if name_resp.hovered() {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                    if name_resp.clicked() {
+                                        action = Some(SidebarAction::SelectWorkspace(idx));
                                     }
 
                                     if let Some(elapsed) = meta.working_elapsed_secs {
                                         ui.label(
                                             egui::RichText::new(format_elapsed_compact(elapsed))
                                                 .size(10.0)
-                                                .color(chrome.accent)
+                                                .color(tokens.border_focus)
                                                 .strong(),
                                         );
                                     }
@@ -185,8 +206,8 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                                     if has_unread {
                                         ui.label(
                                             egui::RichText::new(format!("[{}]", meta.unread_count))
-                                                .size(11.0)
-                                                .color(Color32::from_rgb(245, 175, 45))
+                                                .size(10.5)
+                                                .color(Color32::from_rgb(251, 191, 36))
                                                 .strong(),
                                         );
                                     }
@@ -194,16 +215,25 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
+                                            ui.spacing_mut().item_spacing.x = 2.0;
                                             if props.workspaces.len() > 1
                                                 && ui
-                                                    .small_button(icon_rich(UiIcon::X, 10.5, None))
+                                                    .small_button(icon_rich(
+                                                        UiIcon::X,
+                                                        10.0,
+                                                        Some(tokens.text_muted),
+                                                    ))
                                                     .on_hover_text("Close workspace")
                                                     .clicked()
                                             {
                                                 action = Some(SidebarAction::CloseWorkspace(idx));
                                             }
                                             if ui
-                                                .small_button(icon_rich(UiIcon::Pencil, 10.5, None))
+                                                .small_button(icon_rich(
+                                                    UiIcon::Pencil,
+                                                    10.0,
+                                                    Some(tokens.text_muted),
+                                                ))
                                                 .on_hover_text("Rename workspace")
                                                 .clicked()
                                             {
@@ -213,28 +243,45 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                                     );
                                 });
 
-                                let folder_name = ws
-                                    .cwd
-                                    .file_name()
-                                    .map(|f| f.to_string_lossy().to_string())
-                                    .unwrap_or_else(|| ws.cwd.to_string_lossy().to_string());
-                                ui.horizontal(|ui| {
-                                    let subtitle = match ws.backend.short_badge() {
-                                        Some(badge) => format!("[{badge}]"),
-                                        None => folder_name,
-                                    };
-                                    ui.label(
-                                        egui::RichText::new(subtitle)
+                                // Row 2: Clean folder path or backend badge
+                                let path_text = match ws.backend.short_badge() {
+                                    Some(badge) => {
+                                        format!("[{badge}] {}", display_clean_path(&ws.cwd))
+                                    }
+                                    None => display_clean_path(&ws.cwd),
+                                };
+                                let path_resp = ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(path_text)
                                             .size(10.0)
-                                            .color(chrome.text_muted),
-                                    );
+                                            .color(tokens.text_muted),
+                                    )
+                                    .truncate()
+                                    .sense(Sense::click()),
+                                );
+                                if path_resp.clicked() {
+                                    action = Some(SidebarAction::SelectWorkspace(idx));
+                                }
+
+                                ui.add_space(4.0);
+
+                                // Row 3: Git branch chip + diff churn on left, smooth polyline sparkline on right
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
                                     if let Some(branch) = &ws.git_branch {
-                                        ui.label(icon_label(
-                                            UiIcon::GitBranch,
-                                            branch,
-                                            10.0,
-                                            Some(Color32::from_rgb(110, 190, 140)),
-                                        ));
+                                        egui::Frame::new()
+                                            .fill(tokens.bg_chrome)
+                                            .stroke(Stroke::new(1.0, tokens.border_subtle))
+                                            .corner_radius(4.0)
+                                            .inner_margin(Vec2::new(5.0, 1.5))
+                                            .show(ui, |ui| {
+                                                ui.label(icon_label(
+                                                    UiIcon::GitBranch,
+                                                    branch,
+                                                    10.0,
+                                                    Some(tokens.text_primary),
+                                                ));
+                                            });
                                     }
                                     if let Some(stat) = meta.git_stats {
                                         if stat.has_changes() {
@@ -244,12 +291,12 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                                                     stat.insertions
                                                 ))
                                                 .size(10.0)
-                                                .color(Color32::from_rgb(80, 215, 130)),
+                                                .color(Color32::from_rgb(74, 222, 128)),
                                             );
                                             ui.label(
                                                 egui::RichText::new(format!("-{}", stat.deletions))
                                                     .size(10.0)
-                                                    .color(Color32::from_rgb(240, 105, 105)),
+                                                    .color(Color32::from_rgb(248, 113, 113)),
                                             );
                                         }
                                     }
@@ -257,37 +304,50 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
                                             let (srect, _) = ui.allocate_exact_size(
-                                                Vec2::new(42.0, 11.0),
-                                                egui::Sense::hover(),
+                                                Vec2::new(48.0, 13.0),
+                                                Sense::hover(),
                                             );
+                                            let spark_col = if is_active {
+                                                tokens.border_focus
+                                            } else if meta
+                                                .status
+                                                .map(|s| s.is_working())
+                                                .unwrap_or(false)
+                                            {
+                                                tokens.status_running_fg
+                                            } else {
+                                                tokens.text_muted
+                                            };
                                             render_sparkline(
                                                 ui.painter(),
                                                 srect,
                                                 &meta.sparkline,
-                                                chrome.accent,
-                                                chrome.panel_stroke,
+                                                spark_col,
+                                                tokens.border_subtle,
                                             );
                                         },
                                     );
                                 });
 
                                 if let Some(snippet) = &meta.latest_snippet {
+                                    ui.add_space(2.0);
                                     ui.add(
                                         egui::Label::new(icon_label(
                                             UiIcon::AlertTriangle,
                                             snippet,
                                             10.0,
-                                            Some(Color32::from_rgb(245, 175, 45)),
+                                            Some(Color32::from_rgb(251, 191, 36)),
                                         ))
                                         .truncate(),
                                     );
                                 } else if let Some(last_line) = &meta.last_output_line {
+                                    ui.add_space(2.0);
                                     ui.add(
                                         egui::Label::new(
                                             egui::RichText::new(format!("> {last_line}"))
                                                 .size(10.0)
                                                 .monospace()
-                                                .color(chrome.text_muted),
+                                                .color(tokens.text_muted),
                                         )
                                         .truncate(),
                                     );
@@ -386,4 +446,18 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
     });
 
     action
+}
+
+fn status_dot_color(status: Option<AgentStatus>, tokens: &UiTokens) -> Color32 {
+    match status {
+        Some(
+            AgentStatus::Working
+            | AgentStatus::Thinking
+            | AgentStatus::RunningTool
+            | AgentStatus::Done,
+        ) => tokens.status_running_fg,
+        Some(AgentStatus::WaitingForInput) => Color32::from_rgb(245, 158, 11),
+        Some(AgentStatus::Failed) => Color32::from_rgb(239, 68, 68),
+        Some(AgentStatus::Idle) | None => Color32::from_rgb(100, 116, 139),
+    }
 }
