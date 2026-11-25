@@ -2569,7 +2569,11 @@ impl eframe::App for AgeMaxApp {
 
         // 4. Main Central Viewport (Welcome / Agents Grid / Split Terminal & ACP & WebView Canvas)
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(window_fill))
+            .frame(
+                egui::Frame::new()
+                    .fill(window_fill)
+                    .inner_margin(egui::Margin::same(4)),
+            )
             .show(ui, |ui| {
                 let avail_rect = ui.available_rect_before_wrap();
                 let content_rect = CoreRect::from_min_size(
@@ -3015,12 +3019,14 @@ impl eframe::App for AgeMaxApp {
                                     Pos2::new(egui_rect.min.x, term_top),
                                     egui_rect.max,
                                 );
-                                let target_w = (target_egui_rect.width() - (pad * 2.0)).max(50.0);
-                                let target_h =
-                                    ((target_egui_rect.height() - header_h).max(40.0) - (pad * 2.0))
-                                        .max(32.0);
-                                let cols = (target_w / self.char_width).floor() as u16;
-                                let rows = (target_h / self.char_height).floor() as u16;
+                                let term_size = compute_terminal_grid_size(
+                                    target_egui_rect.width(),
+                                    target_egui_rect.height(),
+                                    header_h,
+                                    pad,
+                                    self.char_width,
+                                    self.char_height,
+                                );
                                 let origin = Pos2::new(egui_rect.min.x + pad, term_top + pad);
 
                                 // Handle mouse focus and right-click menu trigger
@@ -3080,8 +3086,7 @@ impl eframe::App for AgeMaxApp {
 
                                 if let Some(surface) = self.surfaces.get_mut(&pane_id) {
                                     if rect_anim.allow_backend_resize {
-                                        let new_size = TerminalSize::new(cols, rows);
-                                        let _ = surface.resize(new_size);
+                                        let _ = surface.resize(term_size);
                                     }
 
                                     let cur_rows = surface.rows();
@@ -3184,6 +3189,9 @@ impl eframe::App for AgeMaxApp {
 
                                     for r in 0..cur_rows {
                                         let y = origin.y + (r as f32 * self.char_height);
+                                        if y >= term_rect.max.y {
+                                            break;
+                                        }
                                         let abs_line = surface.viewport_to_grid_line(r);
                                         let mut span_text = String::new();
                                         let mut span_start_c = 0;
@@ -3549,6 +3557,21 @@ impl eframe::App for AgeMaxApp {
     }
 }
 
+fn compute_terminal_grid_size(
+    pane_width: f32,
+    pane_height: f32,
+    header_height: f32,
+    pad: f32,
+    char_width: f32,
+    char_height: f32,
+) -> TerminalSize {
+    let target_w = (pane_width - (pad * 2.0)).max(50.0);
+    let target_h = ((pane_height - header_height).max(40.0) - (pad * 2.0)).max(32.0);
+    let cols = (target_w / char_width.max(1.0)).floor().clamp(2.0, 500.0) as u16;
+    let rows = (target_h / char_height.max(1.0)).floor().clamp(2.0, 200.0) as u16;
+    TerminalSize::new(cols, rows)
+}
+
 fn paths_match(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(ca), Ok(cb)) => ca == cb,
@@ -3612,5 +3635,20 @@ fn egui_key_to_code(key: Key) -> Option<KeyCode> {
         Key::ArrowLeft => Some(KeyCode::ArrowLeft),
         Key::ArrowRight => Some(KeyCode::ArrowRight),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_terminal_grid_size;
+
+    #[test]
+    fn test_compute_terminal_grid_size_scales_with_viewport() {
+        let small = compute_terminal_grid_size(900.0, 560.0, 26.0, 4.0, 8.4, 18.0);
+        let large = compute_terminal_grid_size(1680.0, 940.0, 26.0, 4.0, 8.4, 18.0);
+        assert!(large.cols > small.cols);
+        assert!(large.rows > small.rows);
+        assert!(small.cols >= 100);
+        assert!(small.rows >= 28);
     }
 }
