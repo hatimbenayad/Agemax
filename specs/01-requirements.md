@@ -151,3 +151,27 @@ This document specifies the testable requirements for **Age Max**. Every require
 - **REQ-080**: The UI MUST clearly display the active workspace's full working folder path and lock status so users always see where terminals and agents operate.
 - **REQ-081**: `GeneralConfig` MUST support an optional `default_workspace_dir` and `allowed_root_dir` in `config.toml`; when `allowed_root_dir` is set, Age Max MUST reject workspace creation, Explorer launches, session restores, and IPC requests targeting directories outside `allowed_root_dir` (normalizing `..` traversal and symlinks/canonical paths).
 - **REQ-082**: `GeneralConfig` and Agent Launcher MUST provide a toggleable `enforce_agy_sandbox` option passing `--sandbox` when launching `agy`.
+
+---
+
+## 10. Alive Mission Control & Desktop Polish (Unit 13)
+
+### Unit 13a: Themes, Smooth State Glow, Procedural Mascots & Sound Chimes
+- **REQ-083**: `ThemePreset` MUST provide `Cyberpunk`, `TerminalGreen`, and `Dracula` presets alongside `MidnightDark`, `HighContrast`, and `SoftLight`, selectable in Settings and persisted via `config.toml`.
+- **REQ-084**: Pane borders MUST smoothly interpolate state color transitions (~150–250 ms easing) with soft state-colored glow and transient `Done` green flashes while keeping active keyboard focus visually distinct, and MUST pause continuous repaints once panes settle to `Idle` (`REQ-061`).
+- **REQ-085**: When enabled (`show_agent_mascots`), Age Max MUST draw a clean-room procedural vector Agent Mascot reflecting session state (`Idle` sleeping, `Working`/`Thinking`/`RunningTool` typing, `WaitingForInput` alert, `Done` celebrating, `Failed` error) without obscuring terminal text.
+- **REQ-086**: Attention events MUST support an optional subtle audio chime (`enable_sound_notifications`) synthesized clean-room in memory and debounced so simultaneous completions never overlap.
+
+### Unit 13b: Live Thinking/Tool States, Mission Control Sidebar, Feed, Grid, Safe Broadcast & Welcome State
+- **REQ-087**: `AgentStatus` MUST support distinct `Thinking` and `RunningTool` states alongside backward-compatible `Working` (updated accurately via `agy acp` and OSC/PTY activity signals), driving per-pane activity sparklines (zero-alloc ring buffer), last output snippet, elapsed working duration, and background-throttled git diff stats (`+N -M`, `REQ-013`).
+- **REQ-088**: The UI MUST provide:
+  - A chronological **Global Activity Feed** paired with the right-side drawer,
+  - An **All-Agents Grid View** across workspaces with mascots, states, sparklines, last line, and click-to-jump,
+  - A **Broadcast Prompt** control requiring explicit target-pane selection/confirmation and skipping exited/non-terminal panes,
+  - A clean **Welcome / Empty State** launcher view (ASCII emblem, Start Agent preset cards, recent sessions) without slowing terminal startup.
+
+### Unit 13c: Debounced Pane Animations, Opt-In Mica Backdrop & Shortcut Safety
+- **REQ-089**: Compositor polish:
+  - Pane open/close/resize layout changes MUST support smooth visual container easing (~140 ms) while debouncing ConPTY resize ioctls and WebView2 bounds updates until layout stabilizes.
+  - Settings MUST offer an opt-in **Windows 11 Mica Backdrop** (`enable_mica_backdrop`) via DWM with opaque fallback on Windows 10.
+  - Shortcuts MUST retain safe `Ctrl+Shift+P` default (`REQ-054` terminal `\x0b` protection) while offering an optional opt-in `Ctrl+K` Command Palette preset in Settings.

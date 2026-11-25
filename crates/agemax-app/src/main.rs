@@ -11,6 +11,7 @@ mod onboarding_settings;
 mod sidebar;
 mod stretch_panels;
 mod tab_bar;
+mod visual_alive;
 mod webview_pane;
 
 use agemax_agy::acp::LiveAcpSession;
@@ -64,6 +65,7 @@ use stretch_panels::{
 };
 use tab_bar::{render_tab_bar, TabBarAction};
 use uuid::Uuid;
+use visual_alive::PaneVisualAnimator;
 use webview_pane::{render_browser_pane, BrowserPaneAction, WebViewSurface};
 
 fn main() -> eframe::Result<()> {
@@ -161,6 +163,8 @@ pub struct AgeMaxApp {
     active_split_drag: Option<ActiveSplitDrag>,
     context_menu: ContextMenuState,
     last_light_visuals: Option<bool>,
+    visual_animator: PaneVisualAnimator,
+    any_pane_animating: bool,
     pending_window_activate: bool,
     host_hwnd: Option<isize>,
     show_notifications_panel: bool,
@@ -287,6 +291,8 @@ impl AgeMaxApp {
             active_split_drag: None,
             context_menu: ContextMenuState::default(),
             last_light_visuals: None,
+            visual_animator: PaneVisualAnimator::new(),
+            any_pane_animating: false,
             pending_window_activate: false,
             host_hwnd: None,
             show_notifications_panel,
@@ -316,6 +322,7 @@ impl AgeMaxApp {
         self.osc_parsers.remove(&pane_id);
         self.pane_status.remove(&pane_id);
         self.agent_conversation_ids.remove(&pane_id);
+        self.visual_animator.remove_pane(pane_id);
     }
 
     fn spawn_surface_for_backend(
@@ -350,6 +357,9 @@ impl AgeMaxApp {
         }
         if self.config.general.enable_taskbar_flash {
             self.notification_service.flash_window();
+        }
+        if self.config.general.enable_sound_notifications {
+            self.notification_service.play_chime();
         }
     }
 
@@ -1854,6 +1864,8 @@ impl eframe::App for AgeMaxApp {
 
         if dirty {
             ctx.request_repaint();
+        } else if self.any_pane_animating {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
         } else {
             ctx.request_repaint_after(std::time::Duration::from_millis(30));
         }
@@ -1883,6 +1895,8 @@ impl eframe::App for AgeMaxApp {
             self.last_light_visuals = Some(is_light);
         }
 
+        let mut any_animating = false;
+        let now_instant = Instant::now();
         let full_frame = egui::Frame::new().fill(color32_from_rgb(resolved_theme.background));
         full_frame.show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1916,6 +1930,7 @@ impl eframe::App for AgeMaxApp {
                         active_index: self.active_workspace_index,
                         is_collapsed: self.is_sidebar_collapsed,
                         meta: &sidebar_meta,
+                        theme: &resolved_theme,
                     },
                 );
 
@@ -1954,6 +1969,7 @@ impl eframe::App for AgeMaxApp {
                     if let Some(tb_action) = render_top_toolbar(
                         ui,
                         &self.config,
+                        &resolved_theme,
                         self.is_sidebar_collapsed,
                         total_unread,
                     ) {
@@ -2008,6 +2024,7 @@ impl eframe::App for AgeMaxApp {
                             &ws.backend,
                             self.config.general.allowed_root_dir.as_deref(),
                             self.config.general.enforce_agy_sandbox,
+                            &resolved_theme,
                         ) {
                             self.settings_modal
                                 .open_tab(&self.config, SettingsTab::Safety);
@@ -2017,7 +2034,13 @@ impl eframe::App for AgeMaxApp {
                     let active_ws_idx = self.active_workspace_index;
                     let show_hints = self.config.general.effective_show_shortcut_hints();
                     let tab_action = if let Some(ws) = self.workspaces.get(active_ws_idx) {
-                        render_tab_bar(ui, &ws.tabs, ws.active_tab_index, show_hints)
+                        render_tab_bar(
+                            ui,
+                            &ws.tabs,
+                            ws.active_tab_index,
+                            show_hints,
+                            &resolved_theme,
+                        )
                     } else {
                         None
                     };
@@ -2319,7 +2342,7 @@ impl eframe::App for AgeMaxApp {
                                     Vec2::new(rect.width(), rect.height()),
                                 );
 
-                                // Pane background and attention ring using resolved TOML ThemeConfig
+                                // Pane background and smooth state-colored attention glow (`REQ-084`)
                                 ui.painter().rect_filled(egui_rect, 2.0, pane_bg_color);
                                 let pane_status = self
                                     .pane_status
@@ -2327,35 +2350,48 @@ impl eframe::App for AgeMaxApp {
                                     .copied()
                                     .unwrap_or(AgentStatus::Idle);
                                 let team_meta = self.pane_team_roles.get(&pane_id).cloned();
+                                let team_color = team_meta.as_ref().map(|m| {
+                                    let c = team_badge_color(m.is_coordinator);
+                                    (c.r(), c.g(), c.b())
+                                });
 
-                                let (border_color, stroke_width) = match pane_status {
-                                    AgentStatus::WaitingForInput => {
-                                        (color32_from_rgb(resolved_theme.ring_waiting), 3.0)
-                                    }
-                                    AgentStatus::Done => {
-                                        (color32_from_rgb(resolved_theme.ring_done), 2.5)
-                                    }
-                                    AgentStatus::Failed => {
-                                        (color32_from_rgb(resolved_theme.ring_failed), 3.0)
-                                    }
-                                    _ if is_focused => {
-                                        (color32_from_rgb(resolved_theme.active_border), 1.5)
-                                    }
-                                    _ if team_meta.is_some() => (
-                                        team_badge_color(
-                                            team_meta.as_ref().is_some_and(|m| m.is_coordinator),
-                                        ),
-                                        1.5,
-                                    ),
-                                    _ => (color32_from_rgb(resolved_theme.inactive_border), 1.0),
-                                };
+                                let border_visual = self.visual_animator.compute(
+                                    pane_id,
+                                    pane_status,
+                                    is_focused,
+                                    team_color,
+                                    &resolved_theme,
+                                    now_instant,
+                                );
+                                any_animating |= border_visual.animating;
+
+                                if let Some(glow_col) = border_visual.outer_glow_color {
+                                    ui.painter().rect_stroke(
+                                        egui_rect.shrink(1.0),
+                                        3.0,
+                                        Stroke::new(border_visual.outer_glow_width, glow_col),
+                                        StrokeKind::Inside,
+                                    );
+                                }
 
                                 ui.painter().rect_stroke(
                                     egui_rect,
                                     2.0,
-                                    Stroke::new(stroke_width, border_color),
+                                    Stroke::new(
+                                        border_visual.border_width,
+                                        border_visual.border_color,
+                                    ),
                                     StrokeKind::Inside,
                                 );
+
+                                if let Some(focus_col) = border_visual.focus_inner_color {
+                                    ui.painter().rect_stroke(
+                                        egui_rect.shrink(2.0),
+                                        1.5,
+                                        Stroke::new(1.0, focus_col),
+                                        StrokeKind::Inside,
+                                    );
+                                }
 
                                 // Optional Guided mode slim 26px per-pane header bar
                                 let header_h = if show_pane_headers { 26.0 } else { 0.0 };
@@ -2376,6 +2412,8 @@ impl eframe::App for AgeMaxApp {
                                             is_focused,
                                             is_zoomed,
                                             show_hints,
+                                            show_mascot: self.config.general.show_agent_mascots,
+                                            resolved_theme: &resolved_theme,
                                             keybindings: &self.config.keybindings,
                                             team_role: team_role_prop,
                                         },
@@ -2987,6 +3025,7 @@ impl eframe::App for AgeMaxApp {
                 }
             });
         });
+        self.any_pane_animating = any_animating;
     }
 }
 

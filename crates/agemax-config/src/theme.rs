@@ -7,6 +7,35 @@ pub enum ThemePreset {
     MidnightDark,
     HighContrast,
     SoftLight,
+    Cyberpunk,
+    TerminalGreen,
+    Dracula,
+}
+
+impl ThemePreset {
+    /// All built-in presets in display order for Settings and CLI UI.
+    pub const fn all() -> &'static [ThemePreset] {
+        &[
+            ThemePreset::MidnightDark,
+            ThemePreset::HighContrast,
+            ThemePreset::SoftLight,
+            ThemePreset::Cyberpunk,
+            ThemePreset::TerminalGreen,
+            ThemePreset::Dracula,
+        ]
+    }
+
+    /// Human-readable label shown inside the Settings UI.
+    pub const fn display_name(&self) -> &'static str {
+        match self {
+            ThemePreset::MidnightDark => "Midnight Dark",
+            ThemePreset::HighContrast => "High Contrast",
+            ThemePreset::SoftLight => "Soft Light",
+            ThemePreset::Cyberpunk => "Cyberpunk",
+            ThemePreset::TerminalGreen => "Terminal Green",
+            ThemePreset::Dracula => "Dracula",
+        }
+    }
 }
 
 /// Resolved RGB palette ready for zero-allocation hot-path terminal rendering.
@@ -87,6 +116,36 @@ impl ThemeConfig {
                 ring_waiting: "#D97706".to_string(),
                 ring_done: "#15803D".to_string(),
                 ring_failed: "#DC2626".to_string(),
+            },
+            ThemePreset::Cyberpunk => Self {
+                background: "#0B0714".to_string(),
+                foreground: "#ECE4FF".to_string(),
+                cursor: "#FF2A85".to_string(),
+                active_border: "#00F0FF".to_string(),
+                inactive_border: "#2D1E4F".to_string(),
+                ring_waiting: "#FFB800".to_string(),
+                ring_done: "#00FF9C".to_string(),
+                ring_failed: "#FF3366".to_string(),
+            },
+            ThemePreset::TerminalGreen => Self {
+                background: "#050C06".to_string(),
+                foreground: "#7CFF8A".to_string(),
+                cursor: "#B8FF65".to_string(),
+                active_border: "#32E66A".to_string(),
+                inactive_border: "#14351D".to_string(),
+                ring_waiting: "#E5C043".to_string(),
+                ring_done: "#39FF14".to_string(),
+                ring_failed: "#FF5252".to_string(),
+            },
+            ThemePreset::Dracula => Self {
+                background: "#282A36".to_string(),
+                foreground: "#F8F8F2".to_string(),
+                cursor: "#FF79C6".to_string(),
+                active_border: "#BD93F9".to_string(),
+                inactive_border: "#44475A".to_string(),
+                ring_waiting: "#FFB86C".to_string(),
+                ring_done: "#50FA7B".to_string(),
+                ring_failed: "#FF5555".to_string(),
             },
         }
     }
