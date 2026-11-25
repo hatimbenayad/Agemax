@@ -79,7 +79,9 @@ use stretch_panels::{
     TeamLauncherModal,
 };
 use tab_bar::{render_tab_bar, TabBarAction};
-use telemetry::{infer_pty_tool_hint, GitStatsPoller, PaneTelemetry, SystemStats, SystemStatsPoller};
+use telemetry::{
+    infer_pty_tool_hint, GitStatsPoller, PaneTelemetry, SystemStats, SystemStatsPoller,
+};
 use uuid::Uuid;
 use visual_alive::{PaneRectAnimator, PaneVisualAnimator};
 use webview_pane::{render_browser_pane, BrowserPaneAction, WebViewSurface};
