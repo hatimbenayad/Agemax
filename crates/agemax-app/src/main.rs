@@ -38,7 +38,8 @@ use agemax_term::vt::GridPoint;
 use agemax_term::PtySystemBackend;
 use chrome_ui::{
     render_pane_header, render_top_toolbar, render_workspace_folder_bar, NewWorkspaceModal,
-    NewWorkspaceRequest, PaneHeaderAction, PaneHeaderProps, RenameModal, RenameTarget, ToolbarAction,
+    NewWorkspaceRequest, PaneHeaderAction, PaneHeaderProps, RenameModal, RenameTarget,
+    ToolbarAction,
 };
 use command_palette::{CommandPalette, PaletteAction};
 use eframe::egui::{self, Color32, FontId, Key, Pos2, Rect, Stroke, StrokeKind, Vec2};
@@ -464,7 +465,12 @@ impl AgeMaxApp {
             .unwrap_or(true);
         if req.profile.isolate_storage || is_exited {
             let env = adapter
-                .build_preset_command_with_options(req.preset.clone(), &req.profile, &cwd, req.sandbox)
+                .build_preset_command_with_options(
+                    req.preset.clone(),
+                    &req.profile,
+                    &cwd,
+                    req.sandbox,
+                )
                 .map(|c| c.env)
                 .unwrap_or_default();
             let size = self
@@ -671,7 +677,10 @@ impl AgeMaxApp {
         })
     }
 
-    fn create_workspace_with_backend(&mut self, mut req: NewWorkspaceRequest) -> Option<WorkspaceId> {
+    fn create_workspace_with_backend(
+        &mut self,
+        mut req: NewWorkspaceRequest,
+    ) -> Option<WorkspaceId> {
         if matches!(req.backend, WorkspaceBackend::Local) {
             match validate_workspace_path(&req.cwd, self.config.general.allowed_root_dir.as_deref())
             {
@@ -679,8 +688,7 @@ impl AgeMaxApp {
                     req.cwd = safe_dir;
                 }
                 Err(err) => {
-                    if let (Some(ws), Some(pane)) =
-                        (self.active_workspace(), self.active_pane_id())
+                    if let (Some(ws), Some(pane)) = (self.active_workspace(), self.active_pane_id())
                     {
                         self.notification_store.notify(
                             ws.id,
@@ -1205,9 +1213,9 @@ impl AgeMaxApp {
                 let _ = reply.send(serde_json::json!(list));
             }
             IpcAppCommand::WorkspaceCreate { name, cwd, reply } => {
-                let dir = cwd.map(PathBuf::from).unwrap_or_else(|| {
-                    resolve_startup_directory(None, &self.config.general)
-                });
+                let dir = cwd
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| resolve_startup_directory(None, &self.config.general));
                 let ws_name =
                     name.unwrap_or_else(|| format!("Workspace {}", self.workspaces.len() + 1));
 
@@ -1215,7 +1223,8 @@ impl AgeMaxApp {
                     validate_workspace_path(&dir, self.config.general.allowed_root_dir.as_deref())
                 {
                     let _ = reply.send(serde_json::json!({ "error": err.to_string() }));
-                } else if let Some(ws_id) = self.create_workspace_in_dir(ws_name.clone(), dir, false)
+                } else if let Some(ws_id) =
+                    self.create_workspace_in_dir(ws_name.clone(), dir, false)
                 {
                     let _ = reply.send(serde_json::json!({
                         "id": ws_id.0.to_string(),
