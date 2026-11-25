@@ -267,14 +267,14 @@ pub fn render_right_drawer(
     let mut action = None;
     let chrome = ThemeChromeColors::from_theme(resolved_theme);
 
-    ui.allocate_ui(Vec2::new(272.0, ui.available_height()), |ui| {
-        let frame = egui::Frame::new()
-            .fill(chrome.panel_bg)
-            .stroke(Stroke::new(1.0, chrome.panel_stroke))
-            .inner_margin(8.0);
+    let frame = egui::Frame::new()
+        .fill(chrome.panel_bg)
+        .stroke(Stroke::new(1.0, chrome.panel_stroke))
+        .inner_margin(8.0);
 
-        frame.show(ui, |ui| {
-            ui.horizontal(|ui| {
+    frame.show(ui, |ui| {
+        ui.set_min_size(ui.available_size());
+        ui.horizontal(|ui| {
                 if ui
                     .selectable_label(
                         active_tab == RightDrawerTab::Alerts,
@@ -386,7 +386,6 @@ pub fn render_right_drawer(
                 }
             });
         });
-    });
 
     action
 }

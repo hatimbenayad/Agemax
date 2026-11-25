@@ -103,7 +103,7 @@ fn main() -> eframe::Result<()> {
             .with_icon(app_icon::window_icon())
             .with_transparent(initial_cfg.general.enable_mica_backdrop)
             .with_inner_size(initial_size)
-            .with_min_inner_size([450.0, 320.0]),
+            .with_min_inner_size([900.0, 540.0]),
         ..Default::default()
     };
 
@@ -2253,38 +2253,43 @@ impl eframe::App for AgeMaxApp {
         } else {
             color32_from_rgb(bg_rgb)
         };
-        let full_frame = egui::Frame::new().fill(window_fill);
-        full_frame.show(ui, |ui| {
-            ui.horizontal(|ui| {
-                // Prepare mission-control sidebar metadata
-                let sidebar_meta: Vec<SidebarWorkspaceMeta> = self
-                    .workspaces
-                    .iter()
-                    .map(|ws| {
-                        let unread_count =
-                            self.notification_store.unread_count_for_workspace(ws.id);
-                        let latest_snippet = self
-                            .notification_store
-                            .latest_unread_for_workspace(ws.id)
-                            .map(|i| i.message.clone());
-                        let active_pid = ws.active_pane_id();
-                        let status =
-                            active_pid.and_then(|pid| self.pane_status.get(&pid).copied());
-                        let tel = active_pid.and_then(|pid| self.pane_telemetry.get(&pid));
-                        SidebarWorkspaceMeta {
-                            unread_count,
-                            latest_snippet,
-                            last_output_line: tel.and_then(|t| t.last_output_line.clone()),
-                            working_elapsed_secs: tel.and_then(|t| t.working_elapsed_secs(now_instant)),
-                            git_stats: self.git_stats_poller.cached.get(&ws.id).copied(),
-                            sparkline: tel.map(|t| t.sparkline).unwrap_or_default(),
-                            status,
-                        }
-                    })
-                    .collect();
+        // 1. Left Workspace Sidebar (full viewport height)
+        let sidebar_width = if self.is_sidebar_collapsed {
+            48.0
+        } else {
+            220.0
+        };
+        let sidebar_meta: Vec<SidebarWorkspaceMeta> = self
+            .workspaces
+            .iter()
+            .map(|ws| {
+                let unread_count = self.notification_store.unread_count_for_workspace(ws.id);
+                let latest_snippet = self
+                    .notification_store
+                    .latest_unread_for_workspace(ws.id)
+                    .map(|i| i.message.clone());
+                let active_pid = ws.active_pane_id();
+                let status = active_pid.and_then(|pid| self.pane_status.get(&pid).copied());
+                let tel = active_pid.and_then(|pid| self.pane_telemetry.get(&pid));
+                SidebarWorkspaceMeta {
+                    unread_count,
+                    latest_snippet,
+                    last_output_line: tel.and_then(|t| t.last_output_line.clone()),
+                    working_elapsed_secs: tel.and_then(|t| t.working_elapsed_secs(now_instant)),
+                    git_stats: self.git_stats_poller.cached.get(&ws.id).copied(),
+                    sparkline: tel.map(|t| t.sparkline).unwrap_or_default(),
+                    status,
+                }
+            })
+            .collect();
 
-                // 1. Sidebar on the left
-                let sidebar_action = render_sidebar(
+        let sidebar_action = egui::Panel::left("workspace_sidebar")
+            .exact_size(sidebar_width)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| {
+                render_sidebar(
                     ui,
                     SidebarProps {
                         workspaces: &self.workspaces,
@@ -2293,159 +2298,210 @@ impl eframe::App for AgeMaxApp {
                         meta: &sidebar_meta,
                         theme: &resolved_theme,
                     },
-                );
+                )
+            })
+            .inner;
 
-                if let Some(action) = sidebar_action {
-                    match action {
-                        SidebarAction::SelectWorkspace(idx) => {
-                            self.active_workspace_index = idx;
-                        }
-                        SidebarAction::CreateWorkspace => self.open_new_workspace_modal(),
-                        SidebarAction::RenameWorkspace(idx) => {
-                            if let Some(ws) = self.workspaces.get(idx) {
-                                let current_name = ws.name.clone();
-                                self.rename_modal
-                                    .open(RenameTarget::Workspace(idx), &current_name);
-                            }
-                        }
-                        SidebarAction::CloseWorkspace(idx) => {
-                            self.close_workspace(idx);
-                        }
-                        SidebarAction::ToggleCollapse => {
-                            self.is_sidebar_collapsed = !self.is_sidebar_collapsed;
-                        }
-                        SidebarAction::OpenViewSettings => {
-                            self.settings_modal.open(&self.config);
-                        }
+        if let Some(action) = sidebar_action {
+            match action {
+                SidebarAction::SelectWorkspace(idx) => {
+                    self.active_workspace_index = idx;
+                }
+                SidebarAction::CreateWorkspace => self.open_new_workspace_modal(),
+                SidebarAction::RenameWorkspace(idx) => {
+                    if let Some(ws) = self.workspaces.get(idx) {
+                        let current_name = ws.name.clone();
+                        self.rename_modal
+                            .open(RenameTarget::Workspace(idx), &current_name);
                     }
                 }
+                SidebarAction::CloseWorkspace(idx) => {
+                    self.close_workspace(idx);
+                }
+                SidebarAction::ToggleCollapse => {
+                    self.is_sidebar_collapsed = !self.is_sidebar_collapsed;
+                }
+                SidebarAction::OpenViewSettings => {
+                    self.settings_modal.open(&self.config);
+                }
+            }
+        }
 
-                // 2. Main content area (Optional Guided Toolbar + Tab Bar + Terminal Panes)
-                ui.vertical(|ui| {
-                    let total_unread: usize = self
-                        .workspaces
-                        .iter()
-                        .map(|w| self.notification_store.unread_count_for_workspace(w.id))
-                        .sum();
-                    if let Some(tb_action) = render_top_toolbar(
+        // 2. Optional Right-Side Notification & Activity Feed Drawer (rendered before CentralPanel)
+        if self.show_notifications_panel {
+            let unread = self.notification_store.unread_items();
+            let recent_feed = self.activity_feed.recent(40);
+            let drawer_act = egui::Panel::right("right_drawer")
+                .exact_size(272.0)
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| {
+                    render_right_drawer(
                         ui,
-                        &self.config,
+                        self.right_drawer_tab,
+                        &unread,
+                        &recent_feed,
                         &resolved_theme,
-                        self.is_sidebar_collapsed,
-                        total_unread,
-                    ) {
-                        match tb_action {
-                            ToolbarAction::ToggleSidebar => {
-                                self.is_sidebar_collapsed = !self.is_sidebar_collapsed;
-                            }
-                            ToolbarAction::OpenNewWorkspace => self.open_new_workspace_modal(),
-                            ToolbarAction::NewTab => self.create_new_tab(),
-                            ToolbarAction::SplitRight => {
-                                self.split_active_pane(SplitDirection::Horizontal);
-                            }
-                            ToolbarAction::SplitDown => {
-                                self.split_active_pane(SplitDirection::Vertical);
-                            }
-                            ToolbarAction::LaunchAgy => {
-                                if let Some(pane_id) = self.active_pane_id() {
-                                    self.agent_launcher_modal
-                                        .open(pane_id, self.config.general.enforce_agy_sandbox);
+                    )
+                })
+                .inner;
+            if let Some(drawer_act) = drawer_act {
+                match drawer_act {
+                    RightDrawerAction::SwitchTab(tab) => {
+                        self.right_drawer_tab = tab;
+                    }
+                    RightDrawerAction::FocusPane(ws_id, pane_id) => {
+                        if let Some(pos) = self.workspaces.iter().position(|w| w.id == ws_id) {
+                            self.active_workspace_index = pos;
+                            if let Some(ws) = self.workspaces.get_mut(pos) {
+                                if let Some(tab) = ws.active_tab_mut() {
+                                    tab.active_pane = pane_id;
                                 }
                             }
-                            ToolbarAction::OpenBrowserPane => {
-                                let _ = self.open_browser_in_pane(None, "http://localhost:3000");
-                            }
-                            ToolbarAction::OpenAcpPanel => {
-                                if let Some(pane_id) = self.active_pane_id() {
-                                    self.open_acp_in_pane(pane_id);
-                                }
-                            }
-                            ToolbarAction::LaunchTeamGrid => {
-                                self.team_launcher_modal.open();
-                            }
-                            ToolbarAction::ToggleGridView => {
-                                self.show_grid_view = !self.show_grid_view;
-                                if self.show_grid_view {
-                                    self.show_welcome_view = false;
-                                }
-                            }
-                            ToolbarAction::OpenBroadcast => {
-                                let targets = self.gather_broadcast_targets();
-                                self.broadcast_modal.open(&targets);
-                            }
-                            ToolbarAction::OpenWelcome => {
-                                self.show_welcome_view = !self.show_welcome_view;
-                                if self.show_welcome_view {
-                                    self.show_grid_view = false;
-                                }
-                            }
-                            ToolbarAction::OpenCommandPalette => self.command_palette.open(),
-                            ToolbarAction::ToggleNotifications => {
-                                self.show_notifications_panel = !self.show_notifications_panel;
-                            }
-                            ToolbarAction::OpenViewSettings => {
-                                self.settings_modal.open(&self.config);
-                            }
-                            ToolbarAction::OpenSafetySettings => {
-                                self.settings_modal
-                                    .open_tab(&self.config, SettingsTab::Safety);
-                            }
-                            ToolbarAction::SwitchUiMode(mode) => self.switch_ui_mode(mode),
+                            self.notification_store.mark_pane_read(pane_id);
+                            self.show_grid_view = false;
+                            self.show_welcome_view = false;
                         }
                     }
+                    RightDrawerAction::ClearFeed => {
+                        self.activity_feed.clear();
+                    }
+                }
+            }
+        }
 
-                    if let Some(ws) = self.workspaces.get(self.active_workspace_index) {
-                        if let Some(ToolbarAction::OpenSafetySettings) = render_workspace_folder_bar(
-                            ui,
-                            &ws.cwd,
-                            &ws.backend,
-                            self.config.general.allowed_root_dir.as_deref(),
-                            self.config.general.enforce_agy_sandbox,
-                            &resolved_theme,
-                        ) {
+        // 3. Top Chrome Panel (Toolbar + Folder Lock Bar + Tab Strip + Optional Banners)
+        let active_ws_idx = self.active_workspace_index;
+        egui::Panel::top("top_chrome")
+            .show_separator_line(false)
+            .frame(egui::Frame::new().fill(window_fill))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let total_unread: usize = self
+                    .workspaces
+                    .iter()
+                    .map(|w| self.notification_store.unread_count_for_workspace(w.id))
+                    .sum();
+                if let Some(tb_action) = render_top_toolbar(
+                    ui,
+                    &self.config,
+                    &resolved_theme,
+                    self.is_sidebar_collapsed,
+                    total_unread,
+                ) {
+                    match tb_action {
+                        ToolbarAction::ToggleSidebar => {
+                            self.is_sidebar_collapsed = !self.is_sidebar_collapsed;
+                        }
+                        ToolbarAction::OpenNewWorkspace => self.open_new_workspace_modal(),
+                        ToolbarAction::NewTab => self.create_new_tab(),
+                        ToolbarAction::SplitRight => {
+                            self.split_active_pane(SplitDirection::Horizontal);
+                        }
+                        ToolbarAction::SplitDown => {
+                            self.split_active_pane(SplitDirection::Vertical);
+                        }
+                        ToolbarAction::LaunchAgy => {
+                            if let Some(pane_id) = self.active_pane_id() {
+                                self.agent_launcher_modal
+                                    .open(pane_id, self.config.general.enforce_agy_sandbox);
+                            }
+                        }
+                        ToolbarAction::OpenBrowserPane => {
+                            let _ = self.open_browser_in_pane(None, "http://localhost:3000");
+                        }
+                        ToolbarAction::OpenAcpPanel => {
+                            if let Some(pane_id) = self.active_pane_id() {
+                                self.open_acp_in_pane(pane_id);
+                            }
+                        }
+                        ToolbarAction::LaunchTeamGrid => {
+                            self.team_launcher_modal.open();
+                        }
+                        ToolbarAction::ToggleGridView => {
+                            self.show_grid_view = !self.show_grid_view;
+                            if self.show_grid_view {
+                                self.show_welcome_view = false;
+                            }
+                        }
+                        ToolbarAction::OpenBroadcast => {
+                            let targets = self.gather_broadcast_targets();
+                            self.broadcast_modal.open(&targets);
+                        }
+                        ToolbarAction::OpenWelcome => {
+                            self.show_welcome_view = !self.show_welcome_view;
+                            if self.show_welcome_view {
+                                self.show_grid_view = false;
+                            }
+                        }
+                        ToolbarAction::OpenCommandPalette => self.command_palette.open(),
+                        ToolbarAction::ToggleNotifications => {
+                            self.show_notifications_panel = !self.show_notifications_panel;
+                        }
+                        ToolbarAction::OpenViewSettings => {
+                            self.settings_modal.open(&self.config);
+                        }
+                        ToolbarAction::OpenSafetySettings => {
                             self.settings_modal
                                 .open_tab(&self.config, SettingsTab::Safety);
                         }
+                        ToolbarAction::SwitchUiMode(mode) => self.switch_ui_mode(mode),
                     }
+                }
 
-                    let active_ws_idx = self.active_workspace_index;
-                    let show_hints = self.config.general.effective_show_shortcut_hints();
-                    let tab_action = if let Some(ws) = self.workspaces.get(active_ws_idx) {
-                        render_tab_bar(
-                            ui,
-                            &ws.tabs,
-                            ws.active_tab_index,
-                            show_hints,
-                            &resolved_theme,
-                        )
-                    } else {
-                        None
-                    };
+                if let Some(ws) = self.workspaces.get(self.active_workspace_index) {
+                    if let Some(ToolbarAction::OpenSafetySettings) = render_workspace_folder_bar(
+                        ui,
+                        &ws.cwd,
+                        &ws.backend,
+                        self.config.general.allowed_root_dir.as_deref(),
+                        self.config.general.enforce_agy_sandbox,
+                        &resolved_theme,
+                    ) {
+                        self.settings_modal
+                            .open_tab(&self.config, SettingsTab::Safety);
+                    }
+                }
 
-                    if let Some(action) = tab_action {
-                        match action {
-                            TabBarAction::Select(idx) => {
+                let show_hints = self.config.general.effective_show_shortcut_hints();
+                let tab_action = if let Some(ws) = self.workspaces.get(active_ws_idx) {
+                    render_tab_bar(
+                        ui,
+                        &ws.tabs,
+                        ws.active_tab_index,
+                        show_hints,
+                        &resolved_theme,
+                    )
+                } else {
+                    None
+                };
+
+                if let Some(action) = tab_action {
+                    match action {
+                        TabBarAction::Select(idx) => {
+                            if let Some(ws) = self.workspaces.get_mut(active_ws_idx) {
+                                ws.active_tab_index = idx;
+                            }
+                        }
+                        TabBarAction::Create => self.create_new_tab(),
+                        TabBarAction::Rename(tab_index) => {
+                            if let Some(ws) = self.workspaces.get(active_ws_idx) {
+                                if let Some(tab) = ws.tabs.get(tab_index) {
+                                    let current = tab.title.clone();
+                                    self.rename_modal.open(
+                                        RenameTarget::Tab {
+                                            ws_index: active_ws_idx,
+                                            tab_index,
+                                        },
+                                        &current,
+                                    );
+                                }
+                            }
+                        }
+                        TabBarAction::Close(idx) => {
+                            let closed_panes =
                                 if let Some(ws) = self.workspaces.get_mut(active_ws_idx) {
-                                    ws.active_tab_index = idx;
-                                }
-                            }
-                            TabBarAction::Create => self.create_new_tab(),
-                            TabBarAction::Rename(tab_index) => {
-                                if let Some(ws) = self.workspaces.get(active_ws_idx) {
-                                    if let Some(tab) = ws.tabs.get(tab_index) {
-                                        let current = tab.title.clone();
-                                        self.rename_modal.open(
-                                            RenameTarget::Tab {
-                                                ws_index: active_ws_idx,
-                                                tab_index,
-                                            },
-                                            &current,
-                                        );
-                                    }
-                                }
-                            }
-                            TabBarAction::Close(idx) => {
-                                let closed_panes = if let Some(ws) = self.workspaces.get_mut(active_ws_idx) {
                                     if ws.tabs.len() > 1 {
                                         let closed_tab = ws.tabs.remove(idx);
                                         if ws.active_tab_index >= ws.tabs.len() {
@@ -2458,72 +2514,72 @@ impl eframe::App for AgeMaxApp {
                                 } else {
                                     None
                                 };
-                                if let Some(panes) = closed_panes {
-                                    for p in panes {
-                                        self.remove_pane_resources(p);
-                                    }
-                                    self.save_session();
+                            if let Some(panes) = closed_panes {
+                                for p in panes {
+                                    self.remove_pane_resources(p);
                                 }
+                                self.save_session();
                             }
                         }
                     }
+                }
 
-                    // Optional first-run agy.exe onboarding setup banner (REQ-075)
-                    if let Some(onb) =
-                        render_onboarding_banner(ui, &mut self.preflight, &self.config)
-                    {
-                        match onb {
-                            OnboardingAction::Recheck => {
-                                self.preflight.trigger_check(
-                                    self.config.general.default_shell.clone(),
-                                    Some(ui.ctx().clone()),
-                                );
-                            }
-                            OnboardingAction::HideForever => {
-                                self.config.general.enable_onboarding_banner = false;
-                                let _ = self.config.save_default();
-                            }
-                            OnboardingAction::Dismiss => {
-                                self.preflight.session_dismissed = true;
-                            }
+                // Optional first-run agy.exe onboarding setup banner (REQ-075)
+                if let Some(onb) = render_onboarding_banner(ui, &mut self.preflight, &self.config) {
+                    match onb {
+                        OnboardingAction::Recheck => {
+                            self.preflight.trigger_check(
+                                self.config.general.default_shell.clone(),
+                                Some(ui.ctx().clone()),
+                            );
+                        }
+                        OnboardingAction::HideForever => {
+                            self.config.general.enable_onboarding_banner = false;
+                            let _ = self.config.save_default();
+                        }
+                        OnboardingAction::Dismiss => {
+                            self.preflight.session_dismissed = true;
                         }
                     }
+                }
 
-                    // Optional non-blocking startup session restore prompt
-                    let mut restore_decision = None;
-                    if let Some(ref snap) = self.pending_restore {
-                        restore_decision =
-                            render_session_restore_banner(ui, snap, &resolved_theme);
-                    }
-                    if let Some(decision) = restore_decision {
-                        match decision {
-                            SessionRestoreAction::RestoreWorkspacesOnly => {
-                                if let Some(snap) = self.pending_restore.take() {
-                                    self.restore_session_snapshot(snap, false);
-                                }
-                            }
-                            SessionRestoreAction::RestoreAndResumeAgents => {
-                                if let Some(snap) = self.pending_restore.take() {
-                                    self.restore_session_snapshot(snap, true);
-                                }
-                            }
-                            SessionRestoreAction::Dismiss => {
-                                self.pending_restore = None;
+                // Optional non-blocking startup session restore prompt
+                let mut restore_decision = None;
+                if let Some(ref snap) = self.pending_restore {
+                    restore_decision = render_session_restore_banner(ui, snap, &resolved_theme);
+                }
+                if let Some(decision) = restore_decision {
+                    match decision {
+                        SessionRestoreAction::RestoreWorkspacesOnly => {
+                            if let Some(snap) = self.pending_restore.take() {
+                                self.restore_session_snapshot(snap, false);
                             }
                         }
+                        SessionRestoreAction::RestoreAndResumeAgents => {
+                            if let Some(snap) = self.pending_restore.take() {
+                                self.restore_session_snapshot(snap, true);
+                            }
+                        }
+                        SessionRestoreAction::Dismiss => {
+                            self.pending_restore = None;
+                        }
                     }
+                }
+            });
 
-                    // Calculate content area rectangle
-                    let content_size = ui.available_size();
-                    let content_min = ui.cursor().min;
-                    let content_rect = CoreRect::from_min_size(
-                        Point::new(content_min.x, content_min.y),
-                        content_size.x,
-                        content_size.y,
-                    );
+        // 4. Main Central Viewport (Welcome / Agents Grid / Split Terminal & ACP & WebView Canvas)
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(window_fill))
+            .show(ui, |ui| {
+                let avail_rect = ui.available_rect_before_wrap();
+                let content_rect = CoreRect::from_min_size(
+                    Point::new(avail_rect.min.x, avail_rect.min.y),
+                    avail_rect.width(),
+                    avail_rect.height(),
+                );
 
-                    // Handle keyboard input routed to focused pane
-                    self.handle_input(ui.ctx(), content_rect);
+                // Handle keyboard input routed to focused pane
+                self.handle_input(ui.ctx(), content_rect);
 
                     // Handle global Ctrl+Wheel font zoom + hover mouse wheel scrollback / drag splitters
                     let raw_scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
@@ -2682,6 +2738,7 @@ impl eframe::App for AgeMaxApp {
                             }
                         }
                     } else {
+                        ui.allocate_rect(avail_rect, egui::Sense::hover());
                         if !self.is_modal_open() && !self.context_menu.is_open && raw_scroll_y.abs() > 0.1
                         {
                         if mods_now.ctrl {
@@ -3373,160 +3430,121 @@ impl eframe::App for AgeMaxApp {
                             }
                         }
                     }
-                });
-
-                // 3. Optional Right-Side Notification & Activity Feed Drawer (Ctrl+Shift+N)
-                if self.show_notifications_panel {
-                    let unread = self.notification_store.unread_items();
-                    let recent_feed = self.activity_feed.recent(40);
-                    if let Some(drawer_act) = render_right_drawer(
-                        ui,
-                        self.right_drawer_tab,
-                        &unread,
-                        &recent_feed,
-                        &resolved_theme,
-                    ) {
-                        match drawer_act {
-                            RightDrawerAction::SwitchTab(tab) => {
-                                self.right_drawer_tab = tab;
-                            }
-                            RightDrawerAction::FocusPane(ws_id, pane_id) => {
-                                if let Some(pos) =
-                                    self.workspaces.iter().position(|w| w.id == ws_id)
-                                {
-                                    self.active_workspace_index = pos;
-                                    if let Some(ws) = self.workspaces.get_mut(pos) {
-                                        if let Some(tab) = ws.active_tab_mut() {
-                                            tab.active_pane = pane_id;
-                                        }
-                                    }
-                                    self.notification_store.mark_pane_read(pane_id);
-                                    self.show_grid_view = false;
-                                    self.show_welcome_view = false;
-                                }
-                            }
-                            RightDrawerAction::ClearFeed => {
-                                self.activity_feed.clear();
-                            }
-                        }
-                    }
-                }
-
-                // 4. Command Palette (Ctrl+Shift+P)
-                if let Some(action) = self.command_palette.show(ui.ctx()) {
-                    self.execute_palette_action(action);
-                }
-
-                // 5. New Workspace Modal (Local / WSL / SSH Backend)
-                if let Some(ws_req) = self
-                    .new_workspace_modal
-                    .show(ui.ctx(), self.config.general.allowed_root_dir.as_deref())
-                {
-                    let _ = self.create_workspace_with_backend(ws_req);
-                }
-
-                // 6. Rename Workspace / Tab Modal
-                if let Some((target, new_name)) = self.rename_modal.show(ui.ctx()) {
-                    match target {
-                        RenameTarget::Workspace(idx) => {
-                            if let Some(ws) = self.workspaces.get_mut(idx) {
-                                if ws.rename(new_name) {
-                                    self.save_session();
-                                }
-                            }
-                        }
-                        RenameTarget::Tab {
-                            ws_index,
-                            tab_index,
-                        } => {
-                            if let Some(ws) = self.workspaces.get_mut(ws_index) {
-                                if let Some(tab) = ws.tabs.get_mut(tab_index) {
-                                    if tab.rename(new_name) {
-                                        self.save_session();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 7. Comprehensive Visual Settings Modal (Appearance / Terminal & Alerts / Shortcuts / Quick Actions)
-                if self
-                    .settings_modal
-                    .show(ui.ctx(), &mut self.config, &mut self.preflight)
-                {
-                    self.font_size = self.config.general.font_size.clamp(9.0, 32.0);
-                    self.command_palette.sync_builtins(&self.config.keybindings);
-                    self.command_palette
-                        .set_custom_commands(&self.config.commands);
-                    let _ = self.config.save_default();
-                }
-
-                // 7b. Plain-English Visual Agent Preset Launcher (REQ-076, REQ-080, REQ-082)
-                let active_cwd = self
-                    .active_workspace()
-                    .map(|w| w.cwd.clone())
-                    .unwrap_or_else(|| PathBuf::from("."));
-                if let Some(req) = self.agent_launcher_modal.show(
-                    ui.ctx(),
-                    &mut self.preflight,
-                    &active_cwd,
-                    self.config.general.allowed_root_dir.as_deref(),
-                ) {
-                    self.launch_agent_request(req);
-                }
-
-                // 7c. Multi-Agent Team Grid Launcher (Unit 7 §C)
-                if let Some(team_req) = self.team_launcher_modal.show(ui.ctx()) {
-                    self.launch_team_grid(team_req);
-                }
-
-                // 7d. Safe Multi-Session Prompt Broadcast Modal (REQ-088)
-                if self.broadcast_modal.is_open {
-                    let targets = self.gather_broadcast_targets();
-                    if let Some(b_req) = self.broadcast_modal.show(ui.ctx(), &targets) {
-                        self.execute_broadcast(b_req);
-                    }
-                }
-
-                // 8. Right-Click Context Menu overlay (Copy / Paste / Clear / Split)
-                let has_selection = self
-                    .text_selection
-                    .map(|s| s.is_non_empty() && Some(s.pane_id) == self.context_menu.pane_id)
-                    .unwrap_or(false);
-                if let Some(ctx_action) =
-                    render_context_menu(ui.ctx(), &mut self.context_menu, has_selection)
-                {
-                    match ctx_action {
-                        ContextMenuAction::Copy(pid) => {
-                            self.copy_selection_to_clipboard(ui.ctx(), Some(pid));
-                        }
-                        ContextMenuAction::Paste(pid) => {
-                            self.focus_pane_in_active_tab(pid);
-                            ui.ctx()
-                                .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
-                        }
-                        ContextMenuAction::Clear(pid) => {
-                            if let Some(surface) = self.surfaces.get_mut(&pid) {
-                                surface.clear_screen();
-                            }
-                            self.text_selection = None;
-                        }
-                        ContextMenuAction::SplitRight(pid) => {
-                            self.focus_pane_in_active_tab(pid);
-                            self.split_active_pane(SplitDirection::Horizontal);
-                        }
-                        ContextMenuAction::SplitDown(pid) => {
-                            self.focus_pane_in_active_tab(pid);
-                            self.split_active_pane(SplitDirection::Vertical);
-                        }
-                        ContextMenuAction::LaunchAgy(pid) => self
-                            .agent_launcher_modal
-                            .open(pid, self.config.general.enforce_agy_sandbox),
-                    }
-                }
             });
-        });
+
+        // 5. Floating Modals & Context Menu Overlays (render over all panels)
+        if let Some(action) = self.command_palette.show(ui.ctx()) {
+            self.execute_palette_action(action);
+        }
+
+        // 5. New Workspace Modal (Local / WSL / SSH Backend)
+        if let Some(ws_req) = self
+            .new_workspace_modal
+            .show(ui.ctx(), self.config.general.allowed_root_dir.as_deref())
+        {
+            let _ = self.create_workspace_with_backend(ws_req);
+        }
+
+        // 6. Rename Workspace / Tab Modal
+        if let Some((target, new_name)) = self.rename_modal.show(ui.ctx()) {
+            match target {
+                RenameTarget::Workspace(idx) => {
+                    if let Some(ws) = self.workspaces.get_mut(idx) {
+                        if ws.rename(new_name) {
+                            self.save_session();
+                        }
+                    }
+                }
+                RenameTarget::Tab {
+                    ws_index,
+                    tab_index,
+                } => {
+                    if let Some(ws) = self.workspaces.get_mut(ws_index) {
+                        if let Some(tab) = ws.tabs.get_mut(tab_index) {
+                            if tab.rename(new_name) {
+                                self.save_session();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 7. Comprehensive Visual Settings Modal (Appearance / Terminal & Alerts / Shortcuts / Quick Actions)
+        if self
+            .settings_modal
+            .show(ui.ctx(), &mut self.config, &mut self.preflight)
+        {
+            self.font_size = self.config.general.font_size.clamp(9.0, 32.0);
+            self.command_palette.sync_builtins(&self.config.keybindings);
+            self.command_palette
+                .set_custom_commands(&self.config.commands);
+            let _ = self.config.save_default();
+        }
+
+        // 7b. Plain-English Visual Agent Preset Launcher (REQ-076, REQ-080, REQ-082)
+        let active_cwd = self
+            .active_workspace()
+            .map(|w| w.cwd.clone())
+            .unwrap_or_else(|| PathBuf::from("."));
+        if let Some(req) = self.agent_launcher_modal.show(
+            ui.ctx(),
+            &mut self.preflight,
+            &active_cwd,
+            self.config.general.allowed_root_dir.as_deref(),
+        ) {
+            self.launch_agent_request(req);
+        }
+
+        // 7c. Multi-Agent Team Grid Launcher (Unit 7 §C)
+        if let Some(team_req) = self.team_launcher_modal.show(ui.ctx()) {
+            self.launch_team_grid(team_req);
+        }
+
+        // 7d. Safe Multi-Session Prompt Broadcast Modal (REQ-088)
+        if self.broadcast_modal.is_open {
+            let targets = self.gather_broadcast_targets();
+            if let Some(b_req) = self.broadcast_modal.show(ui.ctx(), &targets) {
+                self.execute_broadcast(b_req);
+            }
+        }
+
+        // 8. Right-Click Context Menu overlay (Copy / Paste / Clear / Split)
+        let has_selection = self
+            .text_selection
+            .map(|s| s.is_non_empty() && Some(s.pane_id) == self.context_menu.pane_id)
+            .unwrap_or(false);
+        if let Some(ctx_action) =
+            render_context_menu(ui.ctx(), &mut self.context_menu, has_selection)
+        {
+            match ctx_action {
+                ContextMenuAction::Copy(pid) => {
+                    self.copy_selection_to_clipboard(ui.ctx(), Some(pid));
+                }
+                ContextMenuAction::Paste(pid) => {
+                    self.focus_pane_in_active_tab(pid);
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                }
+                ContextMenuAction::Clear(pid) => {
+                    if let Some(surface) = self.surfaces.get_mut(&pid) {
+                        surface.clear_screen();
+                    }
+                    self.text_selection = None;
+                }
+                ContextMenuAction::SplitRight(pid) => {
+                    self.focus_pane_in_active_tab(pid);
+                    self.split_active_pane(SplitDirection::Horizontal);
+                }
+                ContextMenuAction::SplitDown(pid) => {
+                    self.focus_pane_in_active_tab(pid);
+                    self.split_active_pane(SplitDirection::Vertical);
+                }
+                ContextMenuAction::LaunchAgy(pid) => self
+                    .agent_launcher_modal
+                    .open(pid, self.config.general.enforce_agy_sandbox),
+            }
+        }
         self.any_pane_animating = any_animating;
     }
 }
