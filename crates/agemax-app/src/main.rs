@@ -5,6 +5,7 @@ mod backdrop_win;
 mod chrome_ui;
 mod command_palette;
 mod folder_picker;
+mod icons;
 mod ipc_bridge;
 mod mission_control;
 mod mouse_ux;
@@ -95,12 +96,13 @@ fn main() -> eframe::Result<()> {
     }
 
     let initial_cfg = AgeMaxConfig::load_or_create_default();
+    let initial_size = parse_capture_inner_size().unwrap_or([1150.0, 720.0]);
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Age Max - Native Agent Multiplexer")
             .with_icon(app_icon::window_icon())
             .with_transparent(initial_cfg.general.enable_mica_backdrop)
-            .with_inner_size([1150.0, 720.0])
+            .with_inner_size(initial_size)
             .with_min_inner_size([450.0, 320.0]),
         ..Default::default()
     };
@@ -119,8 +121,32 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+fn parse_capture_inner_size() -> Option<[f32; 2]> {
+    let raw = std::env::var("AGEMAX_CAPTURE_SIZE").ok()?;
+    let (w_str, h_str) = raw.split_once('x')?;
+    let w: f32 = w_str.trim().parse().ok()?;
+    let h: f32 = h_str.trim().parse().ok()?;
+    Some([w.max(320.0), h.max(240.0)])
+}
+
 fn configure_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
+
+    // Register embedded Lucide icon font in its own dedicated font family
+    icons::register_lucide_font(&mut fonts);
+
+    // On Windows, prefer Segoe UI for proportional UI text if available
+    if let Ok(ui_bytes) = std::fs::read("C:\\Windows\\Fonts\\segoeui.ttf") {
+        fonts.font_data.insert(
+            "Segoe UI".to_owned(),
+            std::sync::Arc::new(egui::FontData::from_owned(ui_bytes)),
+        );
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, "Segoe UI".to_owned());
+    }
 
     // On Windows, attempt to load Cascadia Code or Consolas if present
     for path in &[
@@ -197,6 +223,9 @@ pub struct AgeMaxApp {
     char_height: f32,
     start_time: Instant,
     first_frame_rendered: bool,
+    capture_frames_left: Option<u8>,
+    capture_out_path: Option<PathBuf>,
+    capture_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for AgeMaxApp {
@@ -334,6 +363,13 @@ impl AgeMaxApp {
             char_height: 18.0,
             start_time,
             first_frame_rendered: false,
+            capture_out_path: std::env::var_os("AGEMAX_CAPTURE_SCREENSHOT")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
+            capture_frames_left: std::env::var_os("AGEMAX_CAPTURE_SCREENSHOT")
+                .filter(|v| !v.is_empty())
+                .map(|_| 24),
+            capture_done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -2141,7 +2177,39 @@ impl eframe::App for AgeMaxApp {
             }
         }
 
-        if dirty {
+        if self.capture_done.load(std::sync::atomic::Ordering::Acquire) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        if let Some(left) = self.capture_frames_left {
+            if left == 0 {
+                self.capture_frames_left = None;
+                if let Some(out_path) = self.capture_out_path.take() {
+                    let done_flag = std::sync::Arc::clone(&self.capture_done);
+                    let repaint_ctx = ctx.clone();
+                    ctx.request_screenshot(move |img| {
+                        let [w, h] = img.size;
+                        let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
+                        ppm.reserve(w * h * 3);
+                        for px in &img.pixels {
+                            ppm.push(px.r());
+                            ppm.push(px.g());
+                            ppm.push(px.b());
+                        }
+                        if let Some(parent) = out_path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::fs::write(&out_path, ppm);
+                        done_flag.store(true, std::sync::atomic::Ordering::Release);
+                        repaint_ctx.request_repaint();
+                    });
+                }
+            } else {
+                self.capture_frames_left = Some(left - 1);
+            }
+        }
+
+        if dirty || self.capture_frames_left.is_some() {
             ctx.request_repaint();
         } else if self.any_pane_animating {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
