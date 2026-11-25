@@ -685,7 +685,7 @@ pub fn render_header_strip(
     action
 }
 
-/// Render the Guided Mode top utility toolbar above the tab strip.
+/// Render the Guided Mode single-row grouped icon toolbar with overflow menu and `View: Minimal | Full`.
 pub fn render_top_toolbar(
     ui: &mut egui::Ui,
     config: &AgeMaxConfig,
@@ -700,75 +700,120 @@ pub fn render_top_toolbar(
     let mut action = None;
     let show_hints = config.general.effective_show_shortcut_hints();
     let kb = &config.keybindings;
-    let chrome = ThemeChromeColors::from_theme(resolved_theme);
+    let tokens = UiTokens::from_theme(resolved_theme);
+    let compact = ui.available_width() < 710.0;
 
     let frame = egui::Frame::new()
-        .fill(chrome.panel_bg)
-        .stroke(Stroke::new(1.0, chrome.panel_stroke))
-        .inner_margin(Vec2::new(8.0, 5.0));
+        .fill(tokens.bg_chrome)
+        .inner_margin(Vec2::new(10.0, 6.0));
 
-    frame.show(ui, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            let sidebar_btn = ui.button(icon_text(
-                UiIcon::Menu,
+    let resp = frame.show(ui, |ui| {
+        ui.set_min_height(metrics::TOOLBAR_HEIGHT - 12.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 5.0;
+
+            // Group 1: Workspace & Sidebar
+            let sidebar_hint = if kb.toggle_sidebar.trim().is_empty() {
                 if is_sidebar_collapsed {
                     "Show Sidebar"
                 } else {
-                    "Sidebar"
-                },
-            ));
-            if hint_tooltip(sidebar_btn, show_hints, &kb.toggle_sidebar).clicked() {
+                    "Hide Sidebar"
+                }
+                .to_string()
+            } else {
+                format!(
+                    "{} ({})",
+                    if is_sidebar_collapsed {
+                        "Show Sidebar"
+                    } else {
+                        "Toggle Sidebar"
+                    },
+                    kb.toggle_sidebar
+                )
+            };
+            if toolbar_icon_btn(
+                ui,
+                UiIcon::Menu,
+                !is_sidebar_collapsed,
+                &tokens,
+                show_hints,
+                &sidebar_hint,
+            )
+            .clicked()
+            {
                 action = Some(ToolbarAction::ToggleSidebar);
             }
 
-            if hint_tooltip(
-                ui.button(icon_text(UiIcon::Plus, "Workspace")),
+            if toolbar_icon_btn(
+                ui,
+                UiIcon::Plus,
+                false,
+                &tokens,
                 show_hints,
-                "Choose a project folder",
+                "New Workspace",
             )
             .clicked()
             {
                 action = Some(ToolbarAction::OpenNewWorkspace);
             }
 
-            if hint_tooltip(
-                ui.button(icon_text(UiIcon::Plus, "Tab")),
-                show_hints,
-                &kb.new_tab,
-            )
-            .clicked()
-            {
-                action = Some(ToolbarAction::NewTab);
-            }
+            toolbar_divider(ui, &tokens);
 
-            ui.separator();
-
-            if hint_tooltip(
-                ui.button(icon_text(UiIcon::Columns, "Split Right")),
+            // Group 2: Layout splits & Grid overview
+            if toolbar_icon_btn(
+                ui,
+                UiIcon::Columns,
+                false,
+                &tokens,
                 show_hints,
-                &kb.split_horizontal,
+                &format!("Split Right ({})", kb.split_horizontal),
             )
             .clicked()
             {
                 action = Some(ToolbarAction::SplitRight);
             }
 
-            if hint_tooltip(
-                ui.button(icon_text(UiIcon::Rows, "Split Down")),
+            if toolbar_icon_btn(
+                ui,
+                UiIcon::Rows,
+                false,
+                &tokens,
                 show_hints,
-                &kb.split_vertical,
+                &format!("Split Down ({})", kb.split_vertical),
             )
             .clicked()
             {
                 action = Some(ToolbarAction::SplitDown);
             }
 
-            let agy_btn = ui.button(icon_label(
-                UiIcon::Play,
-                "Start agy",
-                12.5,
-                Some(Color32::from_rgb(125, 225, 165)),
-            ));
+            if toolbar_icon_btn(
+                ui,
+                UiIcon::LayoutGrid,
+                false,
+                &tokens,
+                show_hints,
+                "All Agents Mission Grid",
+            )
+            .clicked()
+            {
+                action = Some(ToolbarAction::ToggleGridView);
+            }
+
+            toolbar_divider(ui, &tokens);
+
+            // Primary filled CTA pill
+            let agy_btn = ui.add(
+                egui::Button::new(icon_label(
+                    UiIcon::Play,
+                    "Start agy",
+                    12.5,
+                    Some(Color32::WHITE),
+                ))
+                .fill(tokens.accent_primary)
+                .stroke(Stroke::new(1.0, tokens.accent_hover))
+                .corner_radius(metrics::RADIUS_SM)
+                .min_size(Vec2::new(92.0, metrics::ICON_BTN_SIZE.y)),
+            );
             if hint_tooltip(
                 agy_btn,
                 show_hints,
@@ -779,130 +824,329 @@ pub fn render_top_toolbar(
                 action = Some(ToolbarAction::LaunchAgy);
             }
 
-            if hint_tooltip(
-                ui.button(icon_text(UiIcon::Globe, "Preview")),
+            toolbar_divider(ui, &tokens);
+
+            // Group 3: Agent / View tools (secondary actions collapse into overflow on tight widths)
+            if toolbar_icon_btn(
+                ui,
+                UiIcon::Eye,
+                false,
+                &tokens,
                 show_hints,
-                "Open an embedded WebView2 browser preview split pane",
+                "Preview: open embedded WebView2 browser pane",
             )
             .clicked()
             {
                 action = Some(ToolbarAction::OpenBrowserPane);
             }
 
-            if hint_tooltip(
-                ui.button(icon_text(UiIcon::Bot, "ACP")),
+            if toolbar_icon_btn(
+                ui,
+                UiIcon::Cpu,
+                false,
+                &tokens,
                 show_hints,
-                "Switch active pane to live Antigravity ACP visual card panel",
+                "ACP: switch active pane to Antigravity ACP panel",
             )
             .clicked()
             {
                 action = Some(ToolbarAction::OpenAcpPanel);
             }
 
-            if hint_tooltip(
-                ui.button(icon_text(UiIcon::Users, "Team")),
+            if toolbar_icon_btn(
+                ui,
+                UiIcon::Users,
+                false,
+                &tokens,
                 show_hints,
-                "Create a coordinated multi-agent team split grid tab",
+                "Team: create multi-agent Coordinator + Workers tab",
             )
             .clicked()
             {
                 action = Some(ToolbarAction::LaunchTeamGrid);
             }
 
-            if hint_tooltip(
-                ui.button(icon_text(UiIcon::LayoutGrid, "Grid")),
-                show_hints,
-                "Mission Control overview grid of all live sessions",
-            )
-            .clicked()
-            {
-                action = Some(ToolbarAction::ToggleGridView);
-            }
-
-            if hint_tooltip(
-                ui.button(icon_text(UiIcon::Megaphone, "Broadcast")),
-                show_hints,
-                "Send a confirmed prompt to selected live sessions",
-            )
-            .clicked()
-            {
-                action = Some(ToolbarAction::OpenBroadcast);
-            }
-
-            if hint_tooltip(
-                ui.button(icon_text(UiIcon::Home, "Home")),
-                show_hints,
-                "Open Welcome launcher & recent sessions",
-            )
-            .clicked()
-            {
-                action = Some(ToolbarAction::OpenWelcome);
-            }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let target_mode = match config.general.ui_mode {
-                    UiMode::Guided => UiMode::Minimal,
-                    UiMode::Minimal => UiMode::Guided,
-                };
-                let mode_text = match config.general.ui_mode {
-                    UiMode::Guided => "View: Guided",
-                    UiMode::Minimal => "View: Minimal",
-                };
-                if hint_tooltip(
-                    ui.button(mode_text),
+            if !compact {
+                if toolbar_icon_btn(
+                    ui,
+                    UiIcon::Radio,
+                    false,
+                    &tokens,
                     show_hints,
-                    "Switch between Guided buttons and Minimal terminal chrome",
+                    "Broadcast prompt to selected sessions",
                 )
                 .clicked()
                 {
-                    action = Some(ToolbarAction::SwitchUiMode(target_mode));
+                    action = Some(ToolbarAction::OpenBroadcast);
                 }
 
-                if hint_tooltip(
-                    ui.button(icon_text(UiIcon::Settings, "Settings")),
+                if toolbar_icon_btn(
+                    ui,
+                    UiIcon::Home,
+                    false,
+                    &tokens,
                     show_hints,
-                    "Open visual Settings, UI View Mode & Shortcuts",
+                    "Home: Welcome launcher & recent workspaces",
                 )
                 .clicked()
+                {
+                    action = Some(ToolbarAction::OpenWelcome);
+                }
+            }
+
+            // Overflow menu (`...`) preserves access to all actions at >= 900 px widths
+            let overflow_btn = ui
+                .add(
+                    egui::Button::new(icon_rich(
+                        UiIcon::MoreHorizontal,
+                        14.0,
+                        Some(tokens.text_muted),
+                    ))
+                    .fill(Color32::TRANSPARENT)
+                    .stroke(Stroke::NONE)
+                    .corner_radius(metrics::RADIUS_SM)
+                    .min_size(Vec2::new(24.0, metrics::ICON_BTN_SIZE.y)),
+                )
+                .on_hover_text("More toolbar actions");
+            egui::Popup::menu(&overflow_btn).show(|ui| {
+                if ui.button(icon_text(UiIcon::Plus, "New Tab")).clicked() {
+                    action = Some(ToolbarAction::NewTab);
+                    ui.close();
+                }
+                if compact {
+                    if ui
+                        .button(icon_text(UiIcon::Radio, "Broadcast Prompt"))
+                        .clicked()
+                    {
+                        action = Some(ToolbarAction::OpenBroadcast);
+                        ui.close();
+                    }
+                    if ui
+                        .button(icon_text(UiIcon::Home, "Welcome / Home"))
+                        .clicked()
+                    {
+                        action = Some(ToolbarAction::OpenWelcome);
+                        ui.close();
+                    }
+                }
+                if ui
+                    .button(icon_text(UiIcon::Command, "Command Palette / Actions"))
+                    .clicked()
+                {
+                    action = Some(ToolbarAction::OpenCommandPalette);
+                    ui.close();
+                }
+                if ui.button(icon_text(UiIcon::Settings, "Settings")).clicked() {
+                    action = Some(ToolbarAction::OpenViewSettings);
+                    ui.close();
+                }
+            });
+
+            // Right utility cluster: View segmented pill, Zap/Actions, Bell+badge
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+
+                // View: [Minimal | Full] segmented toggle
+                let current_mode = config.general.ui_mode;
+                egui::Frame::new()
+                    .fill(tokens.bg_surface)
+                    .stroke(Stroke::new(1.0, tokens.border_subtle))
+                    .corner_radius(metrics::RADIUS_SM)
+                    .inner_margin(Vec2::new(2.0, 2.0))
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        let full_active = current_mode == UiMode::Guided;
+                        let full_btn = ui.add(
+                            egui::Button::new(egui::RichText::new("Full").size(11.0).color(
+                                if full_active {
+                                    Color32::WHITE
+                                } else {
+                                    tokens.text_muted
+                                },
+                            ))
+                            .fill(if full_active {
+                                tokens.accent_primary
+                            } else {
+                                Color32::TRANSPARENT
+                            })
+                            .stroke(Stroke::NONE)
+                            .corner_radius(4.0)
+                            .min_size(Vec2::new(40.0, 20.0)),
+                        );
+                        if hint_tooltip(
+                            full_btn,
+                            show_hints,
+                            "Full mode: show toolbars and pane headers",
+                        )
+                        .clicked()
+                            && !full_active
+                        {
+                            action = Some(ToolbarAction::SwitchUiMode(UiMode::Guided));
+                        }
+
+                        let min_active = current_mode == UiMode::Minimal;
+                        let min_btn = ui.add(
+                            egui::Button::new(egui::RichText::new("Minimal").size(11.0).color(
+                                if min_active {
+                                    Color32::WHITE
+                                } else {
+                                    tokens.text_muted
+                                },
+                            ))
+                            .fill(if min_active {
+                                tokens.accent_primary
+                            } else {
+                                Color32::TRANSPARENT
+                            })
+                            .stroke(Stroke::NONE)
+                            .corner_radius(4.0)
+                            .min_size(Vec2::new(52.0, 20.0)),
+                        );
+                        if hint_tooltip(
+                            min_btn,
+                            show_hints,
+                            "Minimal mode: hide chrome and focus purely on terminals",
+                        )
+                        .clicked()
+                            && !min_active
+                        {
+                            action = Some(ToolbarAction::SwitchUiMode(UiMode::Minimal));
+                        }
+                    });
+
+                ui.label(
+                    egui::RichText::new("View:")
+                        .size(11.0)
+                        .color(tokens.text_muted),
+                );
+
+                if !compact
+                    && toolbar_icon_btn(
+                        ui,
+                        UiIcon::Settings,
+                        false,
+                        &tokens,
+                        show_hints,
+                        "Open visual Settings, View Mode & Shortcuts",
+                    )
+                    .clicked()
                 {
                     action = Some(ToolbarAction::OpenViewSettings);
                 }
 
-                let alert_label = if unread_count > 0 {
-                    icon_label(
-                        UiIcon::Bell,
-                        &format!("Alerts ({unread_count})"),
-                        12.5,
-                        Some(Color32::from_rgb(245, 175, 45)),
-                    )
-                } else {
-                    icon_label(
-                        UiIcon::Bell,
-                        "Alerts",
-                        12.5,
-                        Some(Color32::from_rgb(185, 190, 205)),
-                    )
-                };
-                if hint_tooltip(ui.button(alert_label), show_hints, &kb.toggle_notifications)
-                    .clicked()
-                {
-                    action = Some(ToolbarAction::ToggleNotifications);
-                }
-
-                if hint_tooltip(
-                    ui.button(icon_text(UiIcon::Command, "Actions")),
+                // Quick Actions (Command Palette)
+                if toolbar_icon_btn(
+                    ui,
+                    UiIcon::Zap,
+                    false,
+                    &tokens,
                     show_hints,
-                    &kb.command_palette,
+                    &format!("Actions ({})", kb.command_palette),
                 )
                 .clicked()
                 {
                     action = Some(ToolbarAction::OpenCommandPalette);
                 }
+
+                // Alerts Bell + circular unread badge
+                let bell_hint = if unread_count > 0 {
+                    format!(
+                        "Alerts: {unread_count} unread ({})",
+                        kb.toggle_notifications
+                    )
+                } else {
+                    format!("Alerts & Activity Feed ({})", kb.toggle_notifications)
+                };
+                let bell_resp = toolbar_icon_btn(
+                    ui,
+                    UiIcon::Bell,
+                    unread_count > 0,
+                    &tokens,
+                    show_hints,
+                    &bell_hint,
+                );
+                if unread_count > 0 {
+                    let badge_center =
+                        Pos2::new(bell_resp.rect.max.x - 3.0, bell_resp.rect.min.y + 4.0);
+                    ui.painter()
+                        .circle_filled(badge_center, 6.5, tokens.alert_badge_bg);
+                    let count_str = if unread_count > 9 {
+                        "9+".to_string()
+                    } else {
+                        unread_count.to_string()
+                    };
+                    ui.painter().text(
+                        badge_center,
+                        egui::Align2::CENTER_CENTER,
+                        count_str,
+                        egui::FontId::proportional(9.0),
+                        Color32::WHITE,
+                    );
+                }
+                if bell_resp.clicked() {
+                    action = Some(ToolbarAction::ToggleNotifications);
+                }
             });
         });
     });
 
+    let outer = resp.response.rect;
+    ui.painter().line_segment(
+        [
+            Pos2::new(outer.min.x, outer.max.y),
+            Pos2::new(outer.max.x, outer.max.y),
+        ],
+        Stroke::new(1.0, tokens.border_subtle),
+    );
+
     action
+}
+
+fn toolbar_icon_btn(
+    ui: &mut egui::Ui,
+    icon: UiIcon,
+    highlighted: bool,
+    tokens: &UiTokens,
+    show_hints: bool,
+    hint: &str,
+) -> egui::Response {
+    let btn = egui::Button::new(icon_rich(
+        icon,
+        14.0,
+        Some(if highlighted {
+            tokens.text_primary
+        } else {
+            tokens.text_muted
+        }),
+    ))
+    .fill(if highlighted {
+        tokens.bg_elevated
+    } else {
+        tokens.bg_surface
+    })
+    .stroke(Stroke::new(
+        1.0,
+        if highlighted {
+            tokens.border_focus
+        } else {
+            tokens.border_subtle
+        },
+    ))
+    .corner_radius(metrics::RADIUS_SM)
+    .min_size(metrics::ICON_BTN_SIZE);
+
+    hint_tooltip(ui.add(btn), show_hints, hint)
+}
+
+fn toolbar_divider(ui: &mut egui::Ui, tokens: &UiTokens) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(5.0, 18.0), egui::Sense::hover());
+    ui.painter().line_segment(
+        [
+            Pos2::new(rect.center().x, rect.min.y + 1.0),
+            Pos2::new(rect.center().x, rect.max.y - 1.0),
+        ],
+        Stroke::new(1.0, tokens.border_subtle),
+    );
 }
 
 /// Properties passed into `render_pane_header`.
@@ -1068,14 +1312,16 @@ pub fn render_workspace_folder_bar(
     resolved_theme: &ResolvedTheme,
 ) -> Option<ToolbarAction> {
     let mut action = None;
-    let chrome = ThemeChromeColors::from_theme(resolved_theme);
+    let tokens = UiTokens::from_theme(resolved_theme);
     let frame = egui::Frame::new()
-        .fill(chrome.window_bg)
-        .stroke(Stroke::new(1.0, chrome.panel_stroke))
-        .inner_margin(Vec2::new(8.0, 3.0));
+        .fill(tokens.bg_canvas)
+        .inner_margin(Vec2::new(10.0, 5.0));
 
-    frame.show(ui, |ui| {
+    let resp = frame.show(ui, |ui| {
+        ui.set_min_height(metrics::PATH_BAR_HEIGHT - 10.0);
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+
             let location = match backend {
                 WorkspaceBackend::Local => display_clean_path(cwd),
                 WorkspaceBackend::Wsl { distro, linux_cwd } => format!(
@@ -1088,53 +1334,65 @@ pub fn render_workspace_folder_bar(
                 } => format!("SSH {} ({})", target, remote_dir.as_deref().unwrap_or("~")),
             };
 
-            ui.label(icon_label(
-                UiIcon::Folder,
-                "Working in:",
-                11.0,
-                Some(Color32::from_rgb(150, 160, 180)),
-            ));
-            ui.label(
-                egui::RichText::new(location)
-                    .size(11.0)
-                    .color(Color32::from_rgb(215, 225, 242)),
+            ui.label(icon_rich(UiIcon::Folder, 13.0, Some(tokens.text_muted)));
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(location)
+                        .size(11.5)
+                        .color(tokens.text_muted),
+                )
+                .truncate(),
             );
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let lock_btn = if let Some(root) = allowed_root {
-                    let txt = if sandbox_enabled {
-                        format!("Locked: {} + --sandbox", display_clean_path(root))
-                    } else {
-                        format!("Locked inside: {}", display_clean_path(root))
-                    };
-                    ui.small_button(icon_label(
-                        UiIcon::Lock,
-                        &txt,
-                        10.5,
-                        Some(Color32::from_rgb(125, 225, 165)),
-                    ))
-                    .on_hover_text("Click to manage Safe Folder Lock & agy sandbox settings")
-                } else {
-                    let (ic, txt) = if sandbox_enabled {
-                        (UiIcon::Shield, "Sandbox On • Unrestricted")
-                    } else {
-                        (UiIcon::LockOpen, "Unrestricted Folder (Click to Lock…)")
-                    };
-                    ui.small_button(icon_label(
-                        ic,
-                        txt,
-                        10.5,
-                        Some(Color32::from_rgb(245, 190, 95)),
-                    ))
-                    .on_hover_text("Restrict where Age Max & agents can open workspaces")
-                };
+            ui.add_space(4.0);
 
-                if lock_btn.clicked() {
-                    action = Some(ToolbarAction::OpenSafetySettings);
-                }
-            });
+            let lock_btn = if let Some(root) = allowed_root {
+                let txt = if sandbox_enabled {
+                    "Locked inside folder • --sandbox"
+                } else {
+                    "Locked inside folder"
+                };
+                ui.add(
+                    egui::Button::new(icon_label(UiIcon::Lock, txt, 11.0, Some(tokens.lock_fg)))
+                        .fill(tokens.lock_fill)
+                        .stroke(Stroke::new(1.0, tokens.lock_border))
+                        .corner_radius(metrics::RADIUS_PILL)
+                        .min_size(Vec2::new(0.0, 21.0)),
+                )
+                .on_hover_text(format!(
+                    "Safe Folder Lock active: {}\nClick to manage folder restrictions & --sandbox",
+                    display_clean_path(root)
+                ))
+            } else {
+                let (ic, txt) = if sandbox_enabled {
+                    (UiIcon::Shield, "Sandbox On • Unrestricted")
+                } else {
+                    (UiIcon::LockOpen, "Unrestricted Folder (Click to Lock…)")
+                };
+                ui.add(
+                    egui::Button::new(icon_label(ic, txt, 11.0, Some(tokens.unlocked_fg)))
+                        .fill(tokens.unlocked_fill)
+                        .stroke(Stroke::new(1.0, tokens.unlocked_border))
+                        .corner_radius(metrics::RADIUS_PILL)
+                        .min_size(Vec2::new(0.0, 21.0)),
+                )
+                .on_hover_text("Restrict where Age Max & agents can open workspaces")
+            };
+
+            if lock_btn.clicked() {
+                action = Some(ToolbarAction::OpenSafetySettings);
+            }
         });
     });
+
+    let outer = resp.response.rect;
+    ui.painter().line_segment(
+        [
+            Pos2::new(outer.min.x, outer.max.y),
+            Pos2::new(outer.max.x, outer.max.y),
+        ],
+        Stroke::new(1.0, tokens.border_subtle),
+    );
 
     action
 }

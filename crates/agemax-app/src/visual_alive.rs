@@ -14,7 +14,6 @@ const FAILED_PULSE_SECS: f32 = 1.00;
 /// Cohesive chrome panel colors derived cleanly from `ResolvedTheme`.
 #[derive(Debug, Clone, Copy)]
 pub struct ThemeChromeColors {
-    pub window_bg: Color32,
     pub panel_bg: Color32,
     pub panel_alt_bg: Color32,
     pub panel_stroke: Color32,
@@ -28,7 +27,6 @@ impl ThemeChromeColors {
     pub fn from_theme(theme: &ResolvedTheme) -> Self {
         let t = crate::ui_tokens::UiTokens::from_theme(theme);
         Self {
-            window_bg: t.bg_canvas,
             panel_bg: t.bg_chrome,
             panel_alt_bg: t.bg_surface,
             panel_stroke: t.border_subtle,

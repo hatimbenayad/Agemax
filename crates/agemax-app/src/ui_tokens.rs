@@ -5,10 +5,17 @@ use eframe::egui::{self, Color32, CornerRadius, Stroke};
 
 /// Consistent UI spacing and corner radius constants across chrome panels.
 pub mod metrics {
+    use eframe::egui::Vec2;
+
     pub const RADIUS_SM: f32 = 6.0;
     pub const RADIUS_MD: f32 = 8.0;
+    pub const RADIUS_PILL: f32 = 12.0;
 
     pub const HEADER_HEIGHT: f32 = 38.0;
+    pub const TOOLBAR_HEIGHT: f32 = 40.0;
+    pub const PATH_BAR_HEIGHT: f32 = 30.0;
+
+    pub const ICON_BTN_SIZE: Vec2 = Vec2::new(28.0, 26.0);
 }
 
 /// Unified color tokens harmonized across all built-in theme presets.
@@ -25,6 +32,13 @@ pub struct UiTokens {
     pub accent_hover: Color32,
     pub text_primary: Color32,
     pub text_muted: Color32,
+    pub lock_fill: Color32,
+    pub lock_border: Color32,
+    pub lock_fg: Color32,
+    pub unlocked_fill: Color32,
+    pub unlocked_border: Color32,
+    pub unlocked_fg: Color32,
+    pub alert_badge_bg: Color32,
 }
 
 impl UiTokens {
@@ -72,6 +86,37 @@ impl UiTokens {
                 ((fg.1 as u16 * 55 + bg.1 as u16 * 45) / 100) as u8,
                 ((fg.2 as u16 * 55 + bg.2 as u16 * 45) / 100) as u8,
             ),
+            lock_fill: if is_light {
+                Color32::from_rgb(220, 248, 234)
+            } else {
+                Color32::from_rgb(14, 43, 34)
+            },
+            lock_border: if is_light {
+                Color32::from_rgb(34, 139, 94)
+            } else {
+                Color32::from_rgb(31, 110, 78)
+            },
+            lock_fg: if is_light {
+                Color32::from_rgb(15, 118, 70)
+            } else {
+                Color32::from_rgb(52, 211, 153)
+            },
+            unlocked_fill: if is_light {
+                Color32::from_rgb(254, 243, 199)
+            } else {
+                Color32::from_rgb(44, 32, 14)
+            },
+            unlocked_border: if is_light {
+                Color32::from_rgb(217, 119, 6)
+            } else {
+                Color32::from_rgb(138, 92, 24)
+            },
+            unlocked_fg: if is_light {
+                Color32::from_rgb(180, 83, 9)
+            } else {
+                Color32::from_rgb(251, 191, 36)
+            },
+            alert_badge_bg: Color32::from_rgb(239, 68, 68),
         }
     }
 
