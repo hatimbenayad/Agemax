@@ -303,6 +303,7 @@ impl AgeMaxApp {
         command_palette.set_custom_commands(&config.commands);
 
         let initial_font_size = config.general.font_size.clamp(9.0, 32.0);
+        let initial_sidebar_collapsed = config.general.sidebar_collapsed;
         let pending_restore = SessionSnapshot::load_from_file(&SessionSnapshot::default_path())
             .ok()
             .filter(|snap| !snap.workspaces.is_empty());
@@ -360,7 +361,7 @@ impl AgeMaxApp {
             right_drawer_tab: RightDrawerTab::default(),
             show_grid_view: false,
             show_welcome_view: false,
-            is_sidebar_collapsed: false,
+            is_sidebar_collapsed: initial_sidebar_collapsed,
             font_size: initial_font_size,
             char_width: 8.4,
             char_height: 18.0,
@@ -384,6 +385,10 @@ impl AgeMaxApp {
             || self.agent_launcher_modal.is_open
             || self.team_launcher_modal.is_open
             || self.broadcast_modal.is_open
+    }
+
+    fn is_overlay_active(&self, ctx: &egui::Context) -> bool {
+        self.is_modal_open() || self.context_menu.is_open || egui::Popup::is_any_open(ctx)
     }
 
     fn remove_pane_resources(&mut self, pane_id: PaneId) {
@@ -1282,14 +1287,26 @@ impl AgeMaxApp {
         self.command_palette.open();
     }
 
+    fn toggle_sidebar(&mut self) {
+        self.is_sidebar_collapsed = !self.is_sidebar_collapsed;
+        self.config.general.sidebar_collapsed = self.is_sidebar_collapsed;
+        let _ = self.config.save_default();
+    }
+
+    fn select_workspace(&mut self, idx: usize) {
+        if idx < self.workspaces.len() {
+            self.active_workspace_index = idx;
+            self.show_grid_view = false;
+            self.show_welcome_view = false;
+            self.save_session();
+        }
+    }
+
     pub fn execute_palette_action(&mut self, action: PaletteAction) {
         match action {
             PaletteAction::SwitchWorkspace(ws_id) => {
                 if let Some(pos) = self.workspaces.iter().position(|w| w.id == ws_id) {
-                    self.active_workspace_index = pos;
-                    self.show_grid_view = false;
-                    self.show_welcome_view = false;
-                    self.save_session();
+                    self.select_workspace(pos);
                 }
             }
             PaletteAction::NewTab => self.create_new_tab(),
@@ -1297,9 +1314,7 @@ impl AgeMaxApp {
             PaletteAction::SplitDown => self.split_active_pane(SplitDirection::Vertical),
             PaletteAction::ClosePane => self.close_active_pane(),
             PaletteAction::ToggleZoom => self.toggle_zoom_active(),
-            PaletteAction::ToggleSidebar => {
-                self.is_sidebar_collapsed = !self.is_sidebar_collapsed;
-            }
+            PaletteAction::ToggleSidebar => self.toggle_sidebar(),
             PaletteAction::JumpUnread => self.jump_to_oldest_unread(),
             PaletteAction::ToggleNotifications => {
                 self.show_notifications_panel = !self.show_notifications_panel;
@@ -1751,7 +1766,7 @@ impl AgeMaxApp {
     }
 
     fn handle_input(&mut self, ctx: &egui::Context, content_rect: CoreRect) {
-        if self.is_modal_open() || self.context_menu.is_open {
+        if self.is_overlay_active(ctx) {
             return;
         }
 
@@ -1811,7 +1826,7 @@ impl AgeMaxApp {
                     // Configurable global shortcuts (dynamic from KeybindingsConfig):
                     let kb = &self.config.keybindings;
                     if self.matches_keybinding(&kb.toggle_sidebar, key, &modifiers) {
-                        self.is_sidebar_collapsed = !self.is_sidebar_collapsed;
+                        self.toggle_sidebar();
                         continue;
                     }
                     if self.matches_keybinding(&kb.command_palette, key, &modifiers) {
@@ -2385,7 +2400,7 @@ impl eframe::App for AgeMaxApp {
         if let Some(action) = sidebar_action {
             match action {
                 SidebarAction::SelectWorkspace(idx) => {
-                    self.active_workspace_index = idx;
+                    self.select_workspace(idx);
                 }
                 SidebarAction::CreateWorkspace => self.open_new_workspace_modal(),
                 SidebarAction::RenameWorkspace(idx) => {
@@ -2399,7 +2414,7 @@ impl eframe::App for AgeMaxApp {
                     self.close_workspace(idx);
                 }
                 SidebarAction::ToggleCollapse => {
-                    self.is_sidebar_collapsed = !self.is_sidebar_collapsed;
+                    self.toggle_sidebar();
                 }
                 SidebarAction::OpenViewSettings => {
                     self.settings_modal.open(&self.config);
@@ -2476,7 +2491,7 @@ impl eframe::App for AgeMaxApp {
                 ) {
                     match tb_action {
                         ToolbarAction::ToggleSidebar => {
-                            self.is_sidebar_collapsed = !self.is_sidebar_collapsed;
+                            self.toggle_sidebar();
                         }
                         ToolbarAction::OpenNewWorkspace => self.open_new_workspace_modal(),
                         ToolbarAction::NewTab => self.create_new_tab(),
@@ -2573,6 +2588,7 @@ impl eframe::App for AgeMaxApp {
                             if let Some(ws) = self.workspaces.get_mut(active_ws_idx) {
                                 ws.active_tab_index = idx;
                             }
+                            self.save_session();
                         }
                         TabBarAction::Create => self.create_new_tab(),
                         TabBarAction::Rename(tab_index) => {
@@ -2833,7 +2849,7 @@ impl eframe::App for AgeMaxApp {
                         }
                     } else {
                         ui.allocate_rect(avail_rect, egui::Sense::hover());
-                        if !self.is_modal_open() && !self.context_menu.is_open && raw_scroll_y.abs() > 0.1
+                        if !self.is_overlay_active(ui.ctx()) && raw_scroll_y.abs() > 0.1
                         {
                         if mods_now.ctrl {
                             let step = if raw_scroll_y > 0.0 { 1.0 } else { -1.0 };
@@ -2877,7 +2893,7 @@ impl eframe::App for AgeMaxApp {
 
                     // Handle interactive split divider drag-to-resize (REQ-071)
                     let mut divider_dragging_or_hovered = false;
-                    if !self.is_modal_open() && !self.context_menu.is_open {
+                    if !self.is_overlay_active(ui.ctx()) {
                         if let Some(drag) = self.active_split_drag.clone() {
                             divider_dragging_or_hovered = true;
                             ui.ctx().set_cursor_icon(match drag.direction {
@@ -2979,7 +2995,7 @@ impl eframe::App for AgeMaxApp {
                     // 3. Render panes inside the tab layout
                     let show_pane_headers = self.config.general.effective_show_pane_headers();
                     let show_hints = self.config.general.effective_show_shortcut_hints();
-                    let modal_or_menu_open = self.is_modal_open() || self.context_menu.is_open;
+                    let modal_or_menu_open = self.is_overlay_active(ui.ctx());
                     let host_hwnd = self.host_hwnd;
                     let pane_bg_color = if mica_active && self.config.general.enable_mica_backdrop {
                         Color32::from_rgba_unmultiplied(bg_rgb.0, bg_rgb.1, bg_rgb.2, 218)
@@ -3512,6 +3528,15 @@ impl eframe::App for AgeMaxApp {
 
                     if let Some(pid) = clicked_focus_pane {
                         self.focus_pane_in_active_tab(pid);
+                        if !self.webview_panes.contains_key(&pid)
+                            && !self.acp_panes.contains_key(&pid)
+                        {
+                            ui.ctx().memory_mut(|m| {
+                                if let Some(focused_widget) = m.focused() {
+                                    m.surrender_focus(focused_widget);
+                                }
+                            });
+                        }
                     }
 
                     if let Some(exit_action) = pending_exit_action {

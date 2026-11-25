@@ -9,6 +9,7 @@ fn test_ui_mode_defaults_to_guided_and_parses_legacy_toml() {
     "#;
     let cfg: AgeMaxConfig = toml::from_str(legacy_toml).expect("legacy TOML must deserialize");
     assert_eq!(cfg.general.ui_mode, UiMode::Guided);
+    assert!(!cfg.general.sidebar_collapsed);
     assert!(cfg.general.effective_show_toolbar());
     assert!(cfg.general.effective_show_pane_headers());
     assert!(cfg.general.effective_show_shortcut_hints());
@@ -53,6 +54,7 @@ fn test_config_save_and_reload_roundtrip() {
     let mut cfg = AgeMaxConfig::default();
     cfg.general.ui_mode = UiMode::Minimal;
     cfg.general.show_toolbar = Some(true);
+    cfg.general.sidebar_collapsed = true;
     cfg.keybindings.new_tab = "Ctrl+Shift+N".to_string();
 
     cfg.save_to_path(&path)
