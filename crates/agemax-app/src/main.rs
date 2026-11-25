@@ -14,11 +14,12 @@ mod tab_bar;
 mod webview_pane;
 
 use agemax_agy::acp::LiveAcpSession;
-use agemax_agy::adapter::{AgentAdapter, AntigravityAdapter};
+use agemax_agy::adapter::{AgentAdapter, AgentLaunchPreset, AntigravityAdapter};
 use agemax_agy::osc::{AgentOscEvent, OscParser};
 use agemax_agy::profile::{ProfileConfig, ProfileManager};
 use agemax_config::hot_reload::ConfigWatcher;
 use agemax_config::keybindings::{KeyChord, KeyCode};
+use agemax_config::safety::{resolve_startup_directory, validate_workspace_path};
 use agemax_config::schema::{AgeMaxConfig, UiMode};
 use agemax_core::layout::{Direction, LayoutTree, PaneId, SplitDirection, WorkspaceId};
 use agemax_core::model::{Point, Rect as CoreRect, TeamRoleMeta, TerminalSize};
@@ -36,8 +37,9 @@ use agemax_term::surface::TerminalSurface;
 use agemax_term::vt::GridPoint;
 use agemax_term::PtySystemBackend;
 use chrome_ui::{
-    render_pane_header, render_top_toolbar, NewWorkspaceModal, NewWorkspaceRequest,
-    PaneHeaderAction, PaneHeaderProps, RenameModal, RenameTarget, ToolbarAction,
+    render_pane_header, render_top_toolbar, render_workspace_folder_bar, NewWorkspaceModal,
+    NewWorkspaceRequest, PaneHeaderAction, PaneHeaderProps, RenameModal, RenameTarget,
+    ToolbarAction,
 };
 use command_palette::{CommandPalette, PaletteAction};
 use eframe::egui::{self, Color32, FontId, Key, Pos2, Rect, Stroke, StrokeKind, Vec2};
@@ -50,7 +52,7 @@ use mouse_ux::{
 use notification_win::{NotificationService, PlatformNotificationService};
 use onboarding_settings::{
     render_onboarding_banner, AgentLaunchRequest, AgentLauncherModal, OnboardingAction,
-    PreflightState, SettingsModal,
+    PreflightState, SettingsModal, SettingsTab,
 };
 use sidebar::{render_sidebar, SidebarAction, SidebarProps, SidebarWorkspaceMeta};
 use std::collections::{HashMap, HashSet};
@@ -189,17 +191,20 @@ impl AgeMaxApp {
         let start_time = Instant::now();
         let initial_pane = PaneId::new();
         let explicit_dir = launch_args.cwd.filter(|p| p.is_dir());
-        let ws_name = explicit_dir
-            .as_ref()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-            .filter(|n| !n.trim().is_empty())
-            .unwrap_or_else(|| "Main Workspace".to_string());
-        let cwd = explicit_dir
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let git_branch = detect_git_branch(&cwd);
 
         let mut config = AgeMaxConfig::load_or_create_default();
+        let blocked_startup_dir = explicit_dir.as_ref().and_then(|d| {
+            validate_workspace_path(d, config.general.allowed_root_dir.as_deref()).err()
+        });
+        let cwd = resolve_startup_directory(explicit_dir.as_deref(), &config.general);
         config.merge_workspace_config(&cwd);
+
+        let ws_name = cwd
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| "Main Workspace".to_string());
+        let git_branch = detect_git_branch(&cwd);
 
         let mut initial_workspace = Workspace::new(ws_name, cwd.clone(), initial_pane);
         initial_workspace.git_branch = git_branch;
@@ -243,6 +248,18 @@ impl AgeMaxApp {
             .ok()
             .filter(|snap| !snap.workspaces.is_empty());
 
+        let mut notification_store = NotificationStore::new();
+        let mut show_notifications_panel = false;
+        if let Some(err) = blocked_startup_dir {
+            notification_store.notify(
+                initial_workspace.id,
+                initial_pane,
+                AgentStatus::Failed,
+                format!("Startup folder blocked ({err}) — opened safe folder instead."),
+            );
+            show_notifications_panel = true;
+        }
+
         Self {
             workspaces: vec![initial_workspace],
             active_workspace_index: 0,
@@ -253,7 +270,7 @@ impl AgeMaxApp {
             osc_parsers,
             pane_status,
             agent_conversation_ids: HashMap::new(),
-            notification_store: NotificationStore::new(),
+            notification_store,
             notification_service: Box::new(PlatformNotificationService::new()),
             ipc_rx,
             config,
@@ -272,7 +289,7 @@ impl AgeMaxApp {
             last_light_visuals: None,
             pending_window_activate: false,
             host_hwnd: None,
-            show_notifications_panel: false,
+            show_notifications_panel,
             is_sidebar_collapsed: false,
             font_size: initial_font_size,
             char_width: 8.4,
@@ -448,7 +465,12 @@ impl AgeMaxApp {
             .unwrap_or(true);
         if req.profile.isolate_storage || is_exited {
             let env = adapter
-                .build_preset_command(req.preset.clone(), &req.profile, &cwd)
+                .build_preset_command_with_options(
+                    req.preset.clone(),
+                    &req.profile,
+                    &cwd,
+                    req.sandbox,
+                )
                 .map(|c| c.env)
                 .unwrap_or_default();
             let size = self
@@ -463,7 +485,7 @@ impl AgeMaxApp {
             }
         }
 
-        let line = AntigravityAdapter::shell_line_for_preset(&req.preset);
+        let line = AntigravityAdapter::shell_line_for_preset_with_options(&req.preset, req.sandbox);
         if let Some(surface) = self.surfaces.get_mut(&pane_id) {
             let cmd = format!("{}\r", line);
             let _ = surface.send_input(cmd.as_bytes());
@@ -508,6 +530,12 @@ impl AgeMaxApp {
             } else {
                 fallback_dir.clone()
             };
+            if matches!(ws_snap.backend, WorkspaceBackend::Local)
+                && validate_workspace_path(&ws_dir, self.config.general.allowed_root_dir.as_deref())
+                    .is_err()
+            {
+                continue;
+            }
             let mut tabs = Vec::new();
             for tab_snap in ws_snap.tabs {
                 let mut layout = LayoutTree::from(&tab_snap.layout);
@@ -628,7 +656,11 @@ impl AgeMaxApp {
             .map(|w| w.cwd.clone())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let next_idx = self.workspaces.len() + 1;
-        self.new_workspace_modal.open(&default_dir, next_idx);
+        self.new_workspace_modal.open(
+            &default_dir,
+            next_idx,
+            self.config.general.allowed_root_dir.as_deref(),
+        );
     }
 
     fn create_workspace_in_dir(
@@ -645,7 +677,32 @@ impl AgeMaxApp {
         })
     }
 
-    fn create_workspace_with_backend(&mut self, req: NewWorkspaceRequest) -> Option<WorkspaceId> {
+    fn create_workspace_with_backend(
+        &mut self,
+        mut req: NewWorkspaceRequest,
+    ) -> Option<WorkspaceId> {
+        if matches!(req.backend, WorkspaceBackend::Local) {
+            match validate_workspace_path(&req.cwd, self.config.general.allowed_root_dir.as_deref())
+            {
+                Ok(safe_dir) => {
+                    req.cwd = safe_dir;
+                }
+                Err(err) => {
+                    if let (Some(ws), Some(pane)) = (self.active_workspace(), self.active_pane_id())
+                    {
+                        self.notification_store.notify(
+                            ws.id,
+                            pane,
+                            AgentStatus::Failed,
+                            err.to_string(),
+                        );
+                        self.show_notifications_panel = true;
+                    }
+                    return None;
+                }
+            }
+        }
+
         let pane_id = PaneId::new();
         let mut ws =
             Workspace::with_backend(req.name, req.cwd.clone(), pane_id, req.backend.clone());
@@ -748,6 +805,10 @@ impl AgeMaxApp {
 
         let adapter = AntigravityAdapter::new();
         let has_agy = adapter.detect_binary().is_some();
+        let worker_cmd = AntigravityAdapter::shell_line_for_preset_with_options(
+            &AgentLaunchPreset::NewSession,
+            self.config.general.enforce_agy_sandbox,
+        );
 
         for (&wpid, role) in worker_pids.iter().zip(req.worker_roles.iter()) {
             self.pane_team_roles.insert(
@@ -765,7 +826,8 @@ impl AgeMaxApp {
                 HashMap::new(),
             ) {
                 if req.launch_agy_in_workers && has_agy {
-                    let _ = surf.send_input(b"agy\r");
+                    let cmd = format!("{worker_cmd}\r");
+                    let _ = surf.send_input(cmd.as_bytes());
                     self.pane_status.insert(wpid, AgentStatus::Working);
                 } else {
                     self.pane_status.insert(wpid, AgentStatus::Idle);
@@ -882,8 +944,13 @@ impl AgeMaxApp {
         self.focus_pane_in_active_tab(pane_id);
         let detected = AntigravityAdapter::new().detect_binary();
         if detected.is_some() {
+            let line = AntigravityAdapter::shell_line_for_preset_with_options(
+                &AgentLaunchPreset::NewSession,
+                self.config.general.enforce_agy_sandbox,
+            );
             if let Some(surface) = self.surfaces.get_mut(&pane_id) {
-                let _ = surface.send_input(b"agy\r");
+                let cmd = format!("{line}\r");
+                let _ = surface.send_input(cmd.as_bytes());
             }
         } else if let Some(ws_id) = self.find_workspace_for_pane(pane_id) {
             self.notification_store.notify(
@@ -1008,7 +1075,8 @@ impl AgeMaxApp {
             PaletteAction::NewWorkspace => self.open_new_workspace_modal(),
             PaletteAction::LaunchAgy => {
                 if let Some(pane_id) = self.active_pane_id() {
-                    self.agent_launcher_modal.open(pane_id);
+                    self.agent_launcher_modal
+                        .open(pane_id, self.config.general.enforce_agy_sandbox);
                 }
             }
             PaletteAction::OpenBrowser => {
@@ -1145,13 +1213,19 @@ impl AgeMaxApp {
                 let _ = reply.send(serde_json::json!(list));
             }
             IpcAppCommand::WorkspaceCreate { name, cwd, reply } => {
-                let dir = cwd.map(PathBuf::from).unwrap_or_else(|| {
-                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                });
+                let dir = cwd
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| resolve_startup_directory(None, &self.config.general));
                 let ws_name =
                     name.unwrap_or_else(|| format!("Workspace {}", self.workspaces.len() + 1));
 
-                if let Some(ws_id) = self.create_workspace_in_dir(ws_name.clone(), dir, false) {
+                if let Err(err) =
+                    validate_workspace_path(&dir, self.config.general.allowed_root_dir.as_deref())
+                {
+                    let _ = reply.send(serde_json::json!({ "error": err.to_string() }));
+                } else if let Some(ws_id) =
+                    self.create_workspace_in_dir(ws_name.clone(), dir, false)
+                {
                     let _ = reply.send(serde_json::json!({
                         "id": ws_id.0.to_string(),
                         "name": ws_name
@@ -1308,31 +1382,55 @@ impl AgeMaxApp {
                 let _ = reply.send(serde_json::json!(profiles));
             }
             IpcAppCommand::Activate { cwd, reply } => {
+                let mut blocked_reason: Option<String> = None;
                 if let Some(dir_str) = cwd {
                     let target_dir = PathBuf::from(&dir_str);
                     if target_dir.is_dir() {
-                        if let Some(pos) = self
-                            .workspaces
-                            .iter()
-                            .position(|ws| paths_match(&ws.cwd, &target_dir))
-                        {
-                            self.active_workspace_index = pos;
-                        } else {
-                            let ws_name = target_dir
-                                .file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .filter(|n| !n.trim().is_empty())
-                                .unwrap_or_else(|| {
-                                    format!("Workspace {}", self.workspaces.len() + 1)
-                                });
-                            let _ = self.create_workspace_in_dir(ws_name, target_dir, false);
+                        match validate_workspace_path(
+                            &target_dir,
+                            self.config.general.allowed_root_dir.as_deref(),
+                        ) {
+                            Ok(safe_dir) => {
+                                if let Some(pos) = self
+                                    .workspaces
+                                    .iter()
+                                    .position(|ws| paths_match(&ws.cwd, &safe_dir))
+                                {
+                                    self.active_workspace_index = pos;
+                                } else {
+                                    let ws_name = safe_dir
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().to_string())
+                                        .filter(|n| !n.trim().is_empty())
+                                        .unwrap_or_else(|| {
+                                            format!("Workspace {}", self.workspaces.len() + 1)
+                                        });
+                                    let _ = self.create_workspace_in_dir(ws_name, safe_dir, false);
+                                }
+                            }
+                            Err(err) => {
+                                let msg = err.to_string();
+                                blocked_reason = Some(msg.clone());
+                                if let (Some(ws), Some(pane)) =
+                                    (self.active_workspace(), self.active_pane_id())
+                                {
+                                    self.notification_store.notify(
+                                        ws.id,
+                                        pane,
+                                        AgentStatus::Failed,
+                                        msg,
+                                    );
+                                    self.show_notifications_panel = true;
+                                }
+                            }
                         }
                     }
                 }
                 self.pending_window_activate = true;
                 let _ = reply.send(serde_json::json!({
                     "activated": true,
-                    "active_workspace": self.active_workspace_index
+                    "active_workspace": self.active_workspace_index,
+                    "blocked": blocked_reason,
                 }));
             }
             IpcAppCommand::BrowserOpen {
@@ -1873,7 +1971,8 @@ impl eframe::App for AgeMaxApp {
                             }
                             ToolbarAction::LaunchAgy => {
                                 if let Some(pane_id) = self.active_pane_id() {
-                                    self.agent_launcher_modal.open(pane_id);
+                                    self.agent_launcher_modal
+                                        .open(pane_id, self.config.general.enforce_agy_sandbox);
                                 }
                             }
                             ToolbarAction::OpenBrowserPane => {
@@ -1894,7 +1993,24 @@ impl eframe::App for AgeMaxApp {
                             ToolbarAction::OpenViewSettings => {
                                 self.settings_modal.open(&self.config);
                             }
+                            ToolbarAction::OpenSafetySettings => {
+                                self.settings_modal
+                                    .open_tab(&self.config, SettingsTab::Safety);
+                            }
                             ToolbarAction::SwitchUiMode(mode) => self.switch_ui_mode(mode),
+                        }
+                    }
+
+                    if let Some(ws) = self.workspaces.get(self.active_workspace_index) {
+                        if let Some(ToolbarAction::OpenSafetySettings) = render_workspace_folder_bar(
+                            ui,
+                            &ws.cwd,
+                            &ws.backend,
+                            self.config.general.allowed_root_dir.as_deref(),
+                            self.config.general.enforce_agy_sandbox,
+                        ) {
+                            self.settings_modal
+                                .open_tab(&self.config, SettingsTab::Safety);
                         }
                     }
 
@@ -2662,7 +2778,8 @@ impl eframe::App for AgeMaxApp {
                     if let Some(pane_action) = pending_pane_action {
                         match pane_action {
                             PaneHeaderAction::LaunchAgy(pid) => {
-                                self.agent_launcher_modal.open(pid);
+                                self.agent_launcher_modal
+                                    .open(pid, self.config.general.enforce_agy_sandbox);
                             }
                             PaneHeaderAction::SplitRight(pid) => {
                                 self.focus_pane_in_active_tab(pid);
@@ -2769,7 +2886,10 @@ impl eframe::App for AgeMaxApp {
                 }
 
                 // 5. New Workspace Modal (Local / WSL / SSH Backend)
-                if let Some(ws_req) = self.new_workspace_modal.show(ui.ctx()) {
+                if let Some(ws_req) = self
+                    .new_workspace_modal
+                    .show(ui.ctx(), self.config.general.allowed_root_dir.as_deref())
+                {
                     let _ = self.create_workspace_with_backend(ws_req);
                 }
 
@@ -2810,11 +2930,17 @@ impl eframe::App for AgeMaxApp {
                     let _ = self.config.save_default();
                 }
 
-                // 7b. Plain-English Visual Agent Preset Launcher (REQ-076)
-                if let Some(req) = self
-                    .agent_launcher_modal
-                    .show(ui.ctx(), &mut self.preflight)
-                {
+                // 7b. Plain-English Visual Agent Preset Launcher (REQ-076, REQ-080, REQ-082)
+                let active_cwd = self
+                    .active_workspace()
+                    .map(|w| w.cwd.clone())
+                    .unwrap_or_else(|| PathBuf::from("."));
+                if let Some(req) = self.agent_launcher_modal.show(
+                    ui.ctx(),
+                    &mut self.preflight,
+                    &active_cwd,
+                    self.config.general.allowed_root_dir.as_deref(),
+                ) {
                     self.launch_agent_request(req);
                 }
 
@@ -2854,7 +2980,9 @@ impl eframe::App for AgeMaxApp {
                             self.focus_pane_in_active_tab(pid);
                             self.split_active_pane(SplitDirection::Vertical);
                         }
-                        ContextMenuAction::LaunchAgy(pid) => self.agent_launcher_modal.open(pid),
+                        ContextMenuAction::LaunchAgy(pid) => self
+                            .agent_launcher_modal
+                            .open(pid, self.config.general.enforce_agy_sandbox),
                     }
                 }
             });

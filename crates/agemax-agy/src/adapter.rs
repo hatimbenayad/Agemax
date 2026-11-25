@@ -95,26 +95,54 @@ impl AntigravityAdapter {
         profile: &ProfileConfig,
         working_dir: &Path,
     ) -> Result<LaunchCommand, AdapterError> {
+        self.build_preset_command_with_options(preset, profile, working_dir, false)
+    }
+
+    /// Build a launch command for a preset with optional `--sandbox` restrictions (`REQ-082`).
+    pub fn build_preset_command_with_options(
+        &self,
+        preset: AgentLaunchPreset,
+        profile: &ProfileConfig,
+        working_dir: &Path,
+        sandbox: bool,
+    ) -> Result<LaunchCommand, AdapterError> {
         let mut cmd = self.build_command(profile, working_dir)?;
-        cmd.args = match preset {
-            AgentLaunchPreset::NewSession => Vec::new(),
-            AgentLaunchPreset::SafePlanMode => vec!["--mode".to_string(), "plan".to_string()],
-            AgentLaunchPreset::ContinueLast => vec!["-c".to_string()],
-            AgentLaunchPreset::ResumeConversation(id) => {
-                vec!["--conversation".to_string(), id]
+        let mut args = Vec::new();
+        if sandbox {
+            args.push("--sandbox".to_string());
+        }
+        match preset {
+            AgentLaunchPreset::NewSession => {}
+            AgentLaunchPreset::SafePlanMode => {
+                args.push("--mode".to_string());
+                args.push("plan".to_string());
             }
-        };
+            AgentLaunchPreset::ContinueLast => {
+                args.push("-c".to_string());
+            }
+            AgentLaunchPreset::ResumeConversation(id) => {
+                args.push("--conversation".to_string());
+                args.push(id);
+            }
+        }
+        cmd.args = args;
         Ok(cmd)
     }
 
     /// Format the interactive shell command string for Mode A in-pane invocation.
     pub fn shell_line_for_preset(preset: &AgentLaunchPreset) -> String {
+        Self::shell_line_for_preset_with_options(preset, false)
+    }
+
+    /// Format the interactive shell command string with optional `--sandbox` (`REQ-082`).
+    pub fn shell_line_for_preset_with_options(preset: &AgentLaunchPreset, sandbox: bool) -> String {
+        let prefix = if sandbox { "agy --sandbox" } else { "agy" };
         match preset {
-            AgentLaunchPreset::NewSession => "agy".to_string(),
-            AgentLaunchPreset::SafePlanMode => "agy --mode plan".to_string(),
-            AgentLaunchPreset::ContinueLast => "agy -c".to_string(),
+            AgentLaunchPreset::NewSession => prefix.to_string(),
+            AgentLaunchPreset::SafePlanMode => format!("{prefix} --mode plan"),
+            AgentLaunchPreset::ContinueLast => format!("{prefix} -c"),
             AgentLaunchPreset::ResumeConversation(id) => {
-                format!("agy --conversation {}", id)
+                format!("{prefix} --conversation {}", id)
             }
         }
     }

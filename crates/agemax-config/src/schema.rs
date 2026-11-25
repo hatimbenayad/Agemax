@@ -38,6 +38,9 @@ pub struct GeneralConfig {
     pub enable_toast_notifications: bool,
     pub enable_taskbar_flash: bool,
     pub enable_onboarding_banner: bool,
+    pub default_workspace_dir: Option<PathBuf>,
+    pub allowed_root_dir: Option<PathBuf>,
+    pub enforce_agy_sandbox: bool,
 }
 
 impl Default for GeneralConfig {
@@ -53,6 +56,9 @@ impl Default for GeneralConfig {
             enable_toast_notifications: true,
             enable_taskbar_flash: true,
             enable_onboarding_banner: true,
+            default_workspace_dir: None,
+            allowed_root_dir: None,
+            enforce_agy_sandbox: false,
         }
     }
 }
