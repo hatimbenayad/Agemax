@@ -1,10 +1,14 @@
 use crate::icons::{icon_rich, UiIcon};
+use crate::ui_tokens::UiTokens;
 use agemax_config::keybindings::KeybindingsConfig;
 use agemax_config::schema::CustomCommand;
+use agemax_config::theme::ResolvedTheme;
+use agemax_core::layout::WorkspaceId;
 use eframe::egui::{self, Color32, Key, Pos2, Rect, Sense, Stroke, Vec2};
 
 #[derive(Debug, Clone)]
 pub enum PaletteAction {
+    SwitchWorkspace(WorkspaceId),
     NewTab,
     SplitRight,
     SplitDown,
@@ -24,6 +28,15 @@ pub enum PaletteAction {
     ToggleUiMode,
     OpenViewSettings,
     Custom(CustomCommand),
+}
+
+#[derive(Debug, Clone)]
+pub struct PaletteWorkspaceItem {
+    pub id: WorkspaceId,
+    pub name: String,
+    pub cwd_display: String,
+    pub git_branch: Option<String>,
+    pub is_active: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -60,8 +73,14 @@ impl CommandPalette {
         palette
     }
 
-    /// Refresh built-in items using the active keybindings while preserving custom commands.
+    /// Refresh built-in items using the active keybindings while preserving workspaces and custom commands.
     pub fn sync_builtins(&mut self, kb: &KeybindingsConfig) {
+        let workspaces: Vec<PaletteItem> = self
+            .items
+            .iter()
+            .filter(|i| matches!(i.action, PaletteAction::SwitchWorkspace(_)))
+            .cloned()
+            .collect();
         let custom: Vec<PaletteItem> = self
             .items
             .iter()
@@ -69,7 +88,8 @@ impl CommandPalette {
             .cloned()
             .collect();
 
-        let mut items = vec![
+        let mut items = workspaces;
+        items.extend(vec![
             PaletteItem {
                 title: "Start Antigravity Agent (agy)".to_string(),
                 description: Some("Launch agy in active pane".to_string()),
@@ -178,9 +198,45 @@ impl CommandPalette {
                 category: "Attention",
                 action: PaletteAction::ToggleNotifications,
             },
-        ];
+        ]);
 
         items.extend(custom);
+        self.items = items;
+    }
+
+    /// Sync active workspace jump entries at the top of the palette without disturbing actions.
+    pub fn sync_workspaces(&mut self, workspaces: &[PaletteWorkspaceItem]) {
+        let non_workspace: Vec<PaletteItem> = self
+            .items
+            .iter()
+            .filter(|i| !matches!(i.action, PaletteAction::SwitchWorkspace(_)))
+            .cloned()
+            .collect();
+
+        let mut items: Vec<PaletteItem> = workspaces
+            .iter()
+            .map(|ws| {
+                let title = if ws.is_active {
+                    format!("{} (active)", ws.name)
+                } else {
+                    ws.name.clone()
+                };
+                let description = match ws.git_branch.as_deref() {
+                    Some(branch) if !branch.is_empty() => {
+                        Some(format!("{branch} · {}", ws.cwd_display))
+                    }
+                    _ => Some(ws.cwd_display.clone()),
+                };
+                PaletteItem {
+                    title,
+                    description,
+                    category: "Workspace",
+                    action: PaletteAction::SwitchWorkspace(ws.id),
+                }
+            })
+            .collect();
+
+        items.extend(non_workspace);
         self.items = items;
     }
 
@@ -231,11 +287,12 @@ impl CommandPalette {
         }
     }
 
-    pub fn show(&mut self, ctx: &egui::Context) -> Option<PaletteAction> {
+    pub fn show(&mut self, ctx: &egui::Context, theme: &ResolvedTheme) -> Option<PaletteAction> {
         if !self.is_open {
             return None;
         }
 
+        let tokens = UiTokens::from_theme(theme);
         let mut executed_action = None;
 
         let screen_rect = ctx
@@ -243,7 +300,7 @@ impl CommandPalette {
             .unwrap_or(Rect::from_min_size(Pos2::ZERO, Vec2::new(1150.0, 720.0)));
         let modal_width = 540.0_f32.min(screen_rect.width() - 40.0);
         let modal_x = (screen_rect.width() - modal_width) / 2.0;
-        let modal_y = 70.0;
+        let modal_y = 64.0;
 
         egui::Window::new("command_palette_modal")
             .fixed_pos(Pos2::new(modal_x, modal_y))
@@ -253,23 +310,19 @@ impl CommandPalette {
             .collapsible(false)
             .frame(
                 egui::Frame::new()
-                    .fill(Color32::from_rgb(24, 27, 38))
-                    .corner_radius(8.0)
-                    .stroke(Stroke::new(1.5, Color32::from_rgb(70, 110, 200)))
+                    .fill(tokens.bg_surface)
+                    .corner_radius(10.0)
+                    .stroke(Stroke::new(1.5, tokens.border_focus))
                     .inner_margin(12.0),
             )
             .show(ctx, |ui| {
                 ui.vertical(|ui| {
                     // Search input bar
                     ui.horizontal(|ui| {
-                        ui.label(icon_rich(
-                            UiIcon::Search,
-                            14.0,
-                            Some(Color32::from_rgb(140, 145, 160)),
-                        ));
+                        ui.label(icon_rich(UiIcon::Search, 14.0, Some(tokens.text_muted)));
                         let text_edit = egui::TextEdit::singleline(&mut self.query)
-                            .hint_text("Type a command or search actions...")
-                            .text_color(Color32::WHITE)
+                            .hint_text("Search workspaces, run action...")
+                            .text_color(tokens.text_primary)
                             .desired_width(ui.available_width() - 20.0);
                         let response = ui.add(text_edit);
                         response.request_focus();
@@ -282,6 +335,11 @@ impl CommandPalette {
                     // Filtered indices
                     let filtered_indices = self.filtered_indices();
                     let count = filtered_indices.len();
+                    if count > 0 && self.selected_index >= count {
+                        self.selected_index = count - 1;
+                    } else if count == 0 {
+                        self.selected_index = 0;
+                    }
 
                     // Keyboard navigation in palette
                     if ui.input(|i| i.key_pressed(Key::Escape)) {
@@ -318,23 +376,33 @@ impl CommandPalette {
                                 let item = &self.items[item_idx];
                                 let is_selected = list_pos == self.selected_index;
                                 let bg = if is_selected {
-                                    Color32::from_rgb(45, 55, 80)
+                                    tokens.bg_elevated
                                 } else {
                                     Color32::TRANSPARENT
                                 };
 
                                 let frame = egui::Frame::new()
                                     .fill(bg)
-                                    .corner_radius(4.0)
+                                    .corner_radius(6.0)
                                     .inner_margin(6.0);
 
                                 let row_resp = frame
                                     .show(ui, |ui| {
                                         ui.horizontal(|ui| {
+                                            if matches!(
+                                                item.action,
+                                                PaletteAction::SwitchWorkspace(_)
+                                            ) {
+                                                ui.label(icon_rich(
+                                                    UiIcon::Folder,
+                                                    13.0,
+                                                    Some(tokens.accent_primary),
+                                                ));
+                                            }
                                             ui.label(
                                                 egui::RichText::new(&item.title)
                                                     .size(13.0)
-                                                    .color(Color32::from_rgb(230, 235, 245))
+                                                    .color(tokens.text_primary)
                                                     .strong(),
                                             );
 
@@ -345,9 +413,7 @@ impl CommandPalette {
                                                         ui.label(
                                                             egui::RichText::new(desc)
                                                                 .size(11.0)
-                                                                .color(Color32::from_rgb(
-                                                                    140, 150, 175,
-                                                                )),
+                                                                .color(tokens.text_muted),
                                                         );
                                                     }
                                                     ui.label(
@@ -356,7 +422,7 @@ impl CommandPalette {
                                                             item.category
                                                         ))
                                                         .size(10.0)
-                                                        .color(Color32::from_rgb(100, 110, 130)),
+                                                        .color(tokens.text_muted),
                                                     );
                                                 },
                                             );
@@ -379,5 +445,65 @@ impl CommandPalette {
             self.close();
         }
         executed_action
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_workspaces_preserves_builtins_and_custom_commands() {
+        let mut palette = CommandPalette::new();
+        palette.set_custom_commands(&[CustomCommand {
+            name: "Run Cargo Check".to_string(),
+            description: Some("Verify workspace".to_string()),
+            command: "cargo check".to_string(),
+            working_dir: None,
+            keybinding: None,
+        }]);
+
+        let ws1 = WorkspaceId::new();
+        let ws2 = WorkspaceId::new();
+        palette.sync_workspaces(&[
+            PaletteWorkspaceItem {
+                id: ws1,
+                name: "agemaxlab".to_string(),
+                cwd_display: "C:\\src\\agemaxlab".to_string(),
+                git_branch: Some("main".to_string()),
+                is_active: true,
+            },
+            PaletteWorkspaceItem {
+                id: ws2,
+                name: "solarity".to_string(),
+                cwd_display: "C:\\src\\solarity".to_string(),
+                git_branch: None,
+                is_active: false,
+            },
+        ]);
+
+        palette.query = "solarity".to_string();
+        let matches = palette.filtered_indices();
+        assert_eq!(matches.len(), 1);
+        assert!(matches!(
+            palette.items[matches[0]].action,
+            PaletteAction::SwitchWorkspace(id) if id == ws2
+        ));
+
+        palette.query = "Run Cargo".to_string();
+        let custom_matches = palette.filtered_indices();
+        assert_eq!(custom_matches.len(), 1);
+        assert!(matches!(
+            palette.items[custom_matches[0]].action,
+            PaletteAction::Custom(_)
+        ));
+
+        palette.sync_builtins(&KeybindingsConfig::default());
+        palette.query = "main".to_string();
+        let branch_matches = palette.filtered_indices();
+        assert!(branch_matches.iter().any(|&idx| matches!(
+            palette.items[idx].action,
+            PaletteAction::SwitchWorkspace(id) if id == ws1
+        )));
     }
 }

@@ -51,7 +51,7 @@ use chrome_ui::{
     NewWorkspaceModal, NewWorkspaceRequest, PaneHeaderAction, PaneHeaderProps, RenameModal,
     RenameTarget, ToolbarAction,
 };
-use command_palette::{CommandPalette, PaletteAction};
+use command_palette::{CommandPalette, PaletteAction, PaletteWorkspaceItem};
 use eframe::egui::{self, Color32, FontId, Key, Pos2, Rect, Stroke, StrokeKind, Vec2};
 use ipc_bridge::{start_ipc_server, IpcAppCommand};
 use mission_control::{
@@ -1261,8 +1261,37 @@ impl AgeMaxApp {
         let _ = snapshot.save_to_file(&path);
     }
 
+    fn sync_command_palette_workspaces(&mut self) {
+        let entries: Vec<PaletteWorkspaceItem> = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .map(|(idx, ws)| PaletteWorkspaceItem {
+                id: ws.id,
+                name: ws.name.clone(),
+                cwd_display: ws.cwd.display().to_string(),
+                git_branch: ws.git_branch.clone(),
+                is_active: idx == self.active_workspace_index,
+            })
+            .collect();
+        self.command_palette.sync_workspaces(&entries);
+    }
+
+    fn open_command_palette(&mut self) {
+        self.sync_command_palette_workspaces();
+        self.command_palette.open();
+    }
+
     pub fn execute_palette_action(&mut self, action: PaletteAction) {
         match action {
+            PaletteAction::SwitchWorkspace(ws_id) => {
+                if let Some(pos) = self.workspaces.iter().position(|w| w.id == ws_id) {
+                    self.active_workspace_index = pos;
+                    self.show_grid_view = false;
+                    self.show_welcome_view = false;
+                    self.save_session();
+                }
+            }
             PaletteAction::NewTab => self.create_new_tab(),
             PaletteAction::SplitRight => self.split_active_pane(SplitDirection::Horizontal),
             PaletteAction::SplitDown => self.split_active_pane(SplitDirection::Vertical),
@@ -1786,7 +1815,7 @@ impl AgeMaxApp {
                         continue;
                     }
                     if self.matches_keybinding(&kb.command_palette, key, &modifiers) {
-                        self.command_palette.open();
+                        self.open_command_palette();
                         continue;
                     }
                     if self.matches_keybinding(&kb.new_tab, key, &modifiers) {
@@ -2262,7 +2291,7 @@ impl eframe::App for AgeMaxApp {
                 })
                 .inner;
             if let Some(ToolbarAction::OpenCommandPalette) = header_act {
-                self.command_palette.open();
+                self.open_command_palette();
             }
         }
 
@@ -2298,7 +2327,7 @@ impl eframe::App for AgeMaxApp {
                 })
                 .inner;
             if let Some(StatusBarAction::OpenCommandPalette) = sb_act {
-                self.command_palette.open();
+                self.open_command_palette();
             }
         }
 
@@ -2490,7 +2519,7 @@ impl eframe::App for AgeMaxApp {
                                 self.show_grid_view = false;
                             }
                         }
-                        ToolbarAction::OpenCommandPalette => self.command_palette.open(),
+                        ToolbarAction::OpenCommandPalette => self.open_command_palette(),
                         ToolbarAction::ToggleNotifications => {
                             self.show_notifications_panel = !self.show_notifications_panel;
                         }
@@ -3527,7 +3556,7 @@ impl eframe::App for AgeMaxApp {
             });
 
         // 5. Floating Modals & Context Menu Overlays (render over all panels)
-        if let Some(action) = self.command_palette.show(ui.ctx()) {
+        if let Some(action) = self.command_palette.show(ui.ctx(), &resolved_theme) {
             self.execute_palette_action(action);
         }
 
