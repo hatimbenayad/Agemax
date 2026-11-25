@@ -22,7 +22,9 @@ use agemax_agy::osc::{AgentOscEvent, OscParser};
 use agemax_agy::profile::{ProfileConfig, ProfileManager};
 use agemax_config::hot_reload::ConfigWatcher;
 use agemax_config::keybindings::{KeyChord, KeyCode};
-use agemax_config::safety::{display_clean_path, resolve_startup_directory, validate_workspace_path};
+use agemax_config::safety::{
+    display_clean_path, resolve_startup_directory, validate_workspace_path,
+};
 use agemax_config::schema::{AgeMaxConfig, UiMode};
 use agemax_core::layout::{Direction, LayoutTree, PaneId, SplitDirection, WorkspaceId};
 use agemax_core::model::{Point, Rect as CoreRect, TeamRoleMeta, TerminalSize};
@@ -368,10 +370,7 @@ impl AgeMaxApp {
         let mut out = Vec::new();
         for ws in &self.workspaces {
             let (backend_label, folder_display) = match &ws.backend {
-                WorkspaceBackend::Local => (
-                    "Local".to_string(),
-                    display_clean_path(&ws.cwd),
-                ),
+                WorkspaceBackend::Local => ("Local".to_string(), display_clean_path(&ws.cwd)),
                 WorkspaceBackend::Wsl { distro, linux_cwd } => (
                     format!("WSL:{}", distro.as_deref().unwrap_or("default")),
                     linux_cwd.as_deref().unwrap_or("~").to_string(),
@@ -2034,7 +2033,11 @@ impl eframe::App for AgeMaxApp {
                 dirty = true;
                 tel.last_output_line = surface.last_non_empty_line();
                 if let Some(hint) = inferred_hint {
-                    let cur = self.pane_status.get(&pane_id).copied().unwrap_or(AgentStatus::Idle);
+                    let cur = self
+                        .pane_status
+                        .get(&pane_id)
+                        .copied()
+                        .unwrap_or(AgentStatus::Idle);
                     if cur == AgentStatus::Idle || tel.heuristic_active {
                         self.pane_status.insert(pane_id, hint);
                         tel.heuristic_active = true;
@@ -2046,7 +2049,11 @@ impl eframe::App for AgeMaxApp {
         // Decay heuristic PTY burst back to Idle when silent and roll sparkline buckets forward
         let pane_ids_all: Vec<PaneId> = self.pane_status.keys().copied().collect();
         for pane_id in pane_ids_all {
-            let status = self.pane_status.get(&pane_id).copied().unwrap_or(AgentStatus::Idle);
+            let status = self
+                .pane_status
+                .get(&pane_id)
+                .copied()
+                .unwrap_or(AgentStatus::Idle);
             let tel = self
                 .pane_telemetry
                 .entry(pane_id)
@@ -2060,7 +2067,11 @@ impl eframe::App for AgeMaxApp {
                     }
                 }
             }
-            let updated_status = self.pane_status.get(&pane_id).copied().unwrap_or(AgentStatus::Idle);
+            let updated_status = self
+                .pane_status
+                .get(&pane_id)
+                .copied()
+                .unwrap_or(AgentStatus::Idle);
             tel.sync_status(updated_status, now_instant);
         }
 
