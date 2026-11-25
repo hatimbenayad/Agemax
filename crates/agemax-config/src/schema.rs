@@ -59,7 +59,7 @@ impl Default for GeneralConfig {
             enable_toast_notifications: true,
             enable_taskbar_flash: true,
             enable_sound_notifications: true,
-            show_agent_mascots: true,
+            show_agent_mascots: false,
             enable_mica_backdrop: false,
             enable_onboarding_banner: true,
             default_workspace_dir: None,
