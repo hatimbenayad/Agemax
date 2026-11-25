@@ -12,6 +12,7 @@ mod mouse_ux;
 mod notification_win;
 mod onboarding_settings;
 mod sidebar;
+mod status_bar;
 mod stretch_panels;
 mod tab_bar;
 mod telemetry;
@@ -69,6 +70,7 @@ use onboarding_settings::{
     PreflightState, SettingsModal, SettingsTab,
 };
 use sidebar::{render_sidebar, SidebarAction, SidebarProps, SidebarWorkspaceMeta};
+use status_bar::{render_status_bar, StatusBarAction, StatusBarProps};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -2264,7 +2266,43 @@ impl eframe::App for AgeMaxApp {
             }
         }
 
-        // 1. Left Workspace Sidebar (full viewport height below header)
+        // 0b. Bottom Status Bar (full window width when chrome visible)
+        if self.config.general.effective_show_toolbar() {
+            let active_ws = self.workspaces.get(self.active_workspace_index);
+            let branch = active_ws.and_then(|w| w.git_branch.as_deref());
+            let folder_name = active_ws
+                .and_then(|w| w.cwd.file_name().map(|f| f.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "workspace".to_string());
+            let running_agents = self
+                .pane_status
+                .values()
+                .filter(|st| st.is_working())
+                .count();
+            let sb_act = egui::Panel::bottom("status_bar")
+                .exact_size(ui_tokens::metrics::STATUS_BAR_HEIGHT)
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| {
+                    render_status_bar(
+                        ui,
+                        StatusBarProps {
+                            git_branch: branch,
+                            folder_name: &folder_name,
+                            running_agents,
+                            font_size: self.font_size,
+                            command_palette_shortcut: &self.config.keybindings.command_palette,
+                            resolved_theme: &resolved_theme,
+                        },
+                    )
+                })
+                .inner;
+            if let Some(StatusBarAction::OpenCommandPalette) = sb_act {
+                self.command_palette.open();
+            }
+        }
+
+        // 1. Left Workspace Sidebar (full height between header and bottom status bar)
         let sidebar_width = if self.is_sidebar_collapsed {
             48.0
         } else {

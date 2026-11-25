@@ -14,6 +14,7 @@ pub mod metrics {
     pub const HEADER_HEIGHT: f32 = 38.0;
     pub const TOOLBAR_HEIGHT: f32 = 40.0;
     pub const PATH_BAR_HEIGHT: f32 = 30.0;
+    pub const STATUS_BAR_HEIGHT: f32 = 26.0;
 
     pub const ICON_BTN_SIZE: Vec2 = Vec2::new(28.0, 26.0);
 }
@@ -32,6 +33,7 @@ pub struct UiTokens {
     pub accent_hover: Color32,
     pub text_primary: Color32,
     pub text_muted: Color32,
+    pub status_running_fg: Color32,
     pub lock_fill: Color32,
     pub lock_border: Color32,
     pub lock_fg: Color32,
@@ -86,6 +88,7 @@ impl UiTokens {
                 ((fg.1 as u16 * 55 + bg.1 as u16 * 45) / 100) as u8,
                 ((fg.2 as u16 * 55 + bg.2 as u16 * 45) / 100) as u8,
             ),
+            status_running_fg: Color32::from_rgb(74, 222, 128),
             lock_fill: if is_light {
                 Color32::from_rgb(220, 248, 234)
             } else {
