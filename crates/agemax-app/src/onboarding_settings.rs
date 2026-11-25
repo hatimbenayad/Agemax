@@ -921,6 +921,15 @@ fn render_appearance_tab(ui: &mut egui::Ui, config: &mut AgeMaxConfig) -> bool {
         config.general.show_shortcut_hints = Some(hints);
         changed = true;
     }
+    if ui
+        .checkbox(
+            &mut config.general.show_agent_mascots,
+            "Show Animated Agent Mascots in Pane Headers",
+        )
+        .changed()
+    {
+        changed = true;
+    }
 
     ui.add_space(10.0);
     ui.label(
@@ -929,15 +938,11 @@ fn render_appearance_tab(ui: &mut egui::Ui, config: &mut AgeMaxConfig) -> bool {
             .color(Color32::WHITE)
             .strong(),
     );
-    ui.horizontal(|ui| {
-        for (preset, label) in [
-            (ThemePreset::MidnightDark, "Midnight Dark"),
-            (ThemePreset::HighContrast, "High Contrast"),
-            (ThemePreset::SoftLight, "Soft Light"),
-        ] {
+    ui.horizontal_wrapped(|ui| {
+        for &preset in ThemePreset::all() {
             let preset_cfg = ThemeConfig::from_preset(preset);
             if ui
-                .selectable_label(config.theme == preset_cfg, label)
+                .selectable_label(config.theme == preset_cfg, preset.display_name())
                 .clicked()
             {
                 config.theme = preset_cfg;
@@ -1012,6 +1017,15 @@ fn render_terminal_alerts_tab(
         .checkbox(
             &mut config.general.enable_taskbar_flash,
             "Flash taskbar icon on agent attention events",
+        )
+        .changed()
+    {
+        changed = true;
+    }
+    if ui
+        .checkbox(
+            &mut config.general.enable_sound_notifications,
+            "Play subtle sound chime when an agent finishes or needs input",
         )
         .changed()
     {

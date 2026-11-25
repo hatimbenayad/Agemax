@@ -1,3 +1,5 @@
+use crate::visual_alive::ThemeChromeColors;
+use agemax_config::theme::ResolvedTheme;
 use agemax_core::workspace::Tab;
 use eframe::egui::{self, Color32, Vec2};
 
@@ -13,21 +15,21 @@ pub fn render_tab_bar(
     tabs: &[Tab],
     active_index: usize,
     show_hints: bool,
+    theme: &ResolvedTheme,
 ) -> Option<TabBarAction> {
     let mut action = None;
+    let chrome = ThemeChromeColors::from_theme(theme);
 
-    let frame = egui::Frame::new()
-        .fill(Color32::from_rgb(18, 20, 28))
-        .inner_margin(4.0);
+    let frame = egui::Frame::new().fill(chrome.panel_bg).inner_margin(4.0);
 
     frame.show(ui, |ui| {
         ui.horizontal(|ui| {
             for (idx, tab) in tabs.iter().enumerate() {
                 let is_active = idx == active_index;
                 let bg_color = if is_active {
-                    Color32::from_rgb(32, 35, 48)
+                    chrome.panel_alt_bg
                 } else {
-                    Color32::from_rgb(22, 24, 32)
+                    chrome.panel_bg
                 };
 
                 let tab_frame = egui::Frame::new()
@@ -38,9 +40,9 @@ pub fn render_tab_bar(
                 tab_frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let text_color = if is_active {
-                            Color32::WHITE
+                            chrome.text_primary
                         } else {
-                            Color32::from_rgb(150, 155, 170)
+                            chrome.text_muted
                         };
 
                         let link =

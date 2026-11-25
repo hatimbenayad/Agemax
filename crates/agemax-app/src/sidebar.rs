@@ -1,3 +1,5 @@
+use crate::visual_alive::ThemeChromeColors;
+use agemax_config::theme::ResolvedTheme;
 use agemax_core::status::AgentStatus;
 use agemax_core::workspace::Workspace;
 use eframe::egui::{self, Color32, Stroke, Vec2};
@@ -14,6 +16,7 @@ pub struct SidebarProps<'a> {
     pub active_index: usize,
     pub is_collapsed: bool,
     pub meta: &'a [SidebarWorkspaceMeta],
+    pub theme: &'a ResolvedTheme,
 }
 
 pub enum SidebarAction {
@@ -28,11 +31,12 @@ pub enum SidebarAction {
 pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarAction> {
     let mut action = None;
     let width = if props.is_collapsed { 48.0 } else { 220.0 };
+    let chrome = ThemeChromeColors::from_theme(props.theme);
 
     ui.allocate_ui(Vec2::new(width, ui.available_height()), |ui| {
         let frame = egui::Frame::new()
-            .fill(Color32::from_rgb(20, 22, 30))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(35, 38, 50)));
+            .fill(chrome.panel_bg)
+            .stroke(Stroke::new(1.0, chrome.panel_stroke));
 
         frame.show(ui, |ui| {
             ui.vertical(|ui| {
@@ -43,7 +47,7 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                         ui.heading(
                             egui::RichText::new("WORKSPACES")
                                 .size(11.0)
-                                .color(Color32::from_rgb(130, 135, 150))
+                                .color(chrome.text_muted)
                                 .strong(),
                         );
                     }
@@ -66,9 +70,9 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                     let has_unread = meta.unread_count > 0;
 
                     let bg_color = if is_active {
-                        Color32::from_rgb(38, 42, 58)
+                        chrome.panel_alt_bg
                     } else if has_unread {
-                        Color32::from_rgb(32, 28, 20)
+                        Color32::from_rgb(42, 34, 22)
                     } else {
                         Color32::TRANSPARENT
                     };
@@ -76,6 +80,11 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                     let btn_frame = egui::Frame::new()
                         .fill(bg_color)
                         .corner_radius(4.0)
+                        .stroke(if is_active {
+                            Stroke::new(1.0, chrome.accent)
+                        } else {
+                            Stroke::NONE
+                        })
                         .inner_margin(6.0);
 
                     btn_frame.show(ui, |ui| {
@@ -106,11 +115,11 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                         } else {
                             ui.horizontal(|ui| {
                                 let label_color = if is_active {
-                                    Color32::WHITE
+                                    chrome.text_primary
                                 } else if has_unread {
                                     Color32::from_rgb(245, 175, 45)
                                 } else {
-                                    Color32::from_rgb(180, 185, 200)
+                                    chrome.text_muted
                                 };
                                 let label_text = egui::RichText::new(&ws.name)
                                     .color(label_color)

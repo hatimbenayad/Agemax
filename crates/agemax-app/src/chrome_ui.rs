@@ -1,7 +1,9 @@
 use crate::folder_picker::spawn_folder_picker_async;
+use crate::visual_alive::{render_agent_mascot, ThemeChromeColors};
 pub use agemax_config::keybindings::KeybindingsConfig;
 use agemax_config::safety::{display_clean_path, validate_workspace_path};
 use agemax_config::schema::{AgeMaxConfig, UiMode};
+use agemax_config::theme::ResolvedTheme;
 use agemax_core::layout::PaneId;
 use agemax_core::status::AgentStatus;
 use agemax_core::workspace::WorkspaceBackend;
@@ -521,6 +523,7 @@ impl RenameModal {
 pub fn render_top_toolbar(
     ui: &mut egui::Ui,
     config: &AgeMaxConfig,
+    resolved_theme: &ResolvedTheme,
     is_sidebar_collapsed: bool,
     unread_count: usize,
 ) -> Option<ToolbarAction> {
@@ -531,10 +534,11 @@ pub fn render_top_toolbar(
     let mut action = None;
     let show_hints = config.general.effective_show_shortcut_hints();
     let kb = &config.keybindings;
+    let chrome = ThemeChromeColors::from_theme(resolved_theme);
 
     let frame = egui::Frame::new()
-        .fill(Color32::from_rgb(20, 23, 33))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(35, 39, 52)))
+        .fill(chrome.panel_bg)
+        .stroke(Stroke::new(1.0, chrome.panel_stroke))
         .inner_margin(Vec2::new(8.0, 5.0));
 
     frame.show(ui, |ui| {
@@ -679,6 +683,8 @@ pub struct PaneHeaderProps<'a> {
     pub is_focused: bool,
     pub is_zoomed: bool,
     pub show_hints: bool,
+    pub show_mascot: bool,
+    pub resolved_theme: &'a ResolvedTheme,
     pub keybindings: &'a KeybindingsConfig,
     pub team_role: Option<(&'a str, bool)>,
 }
@@ -692,11 +698,12 @@ pub fn render_pane_header(
     let header_rect = props.header_rect;
     let pane_id = props.pane_id;
     let kb = props.keybindings;
+    let chrome = ThemeChromeColors::from_theme(props.resolved_theme);
 
     let bg = if props.is_focused {
-        Color32::from_rgb(27, 32, 46)
+        chrome.panel_alt_bg
     } else {
-        Color32::from_rgb(21, 24, 34)
+        chrome.panel_bg
     };
     ui.painter().rect_filled(header_rect, 0.0, bg);
     ui.painter().line_segment(
@@ -704,7 +711,7 @@ pub fn render_pane_header(
             Pos2::new(header_rect.min.x, header_rect.max.y),
             Pos2::new(header_rect.max.x, header_rect.max.y),
         ],
-        Stroke::new(1.0, Color32::from_rgb(38, 43, 58)),
+        Stroke::new(1.0, chrome.panel_stroke),
     );
 
     let padded = header_rect.shrink2(Vec2::new(6.0, 2.0));
@@ -714,6 +721,18 @@ pub fn render_pane_header(
             .max_rect(padded),
         |ui| {
             ui.horizontal(|ui| {
+                if props.show_mascot {
+                    let (mascot_rect, _) =
+                        ui.allocate_exact_size(Vec2::new(20.0, 18.0), egui::Sense::hover());
+                    let time_secs = ui.input(|i| i.time);
+                    render_agent_mascot(
+                        ui.painter(),
+                        mascot_rect,
+                        props.status,
+                        time_secs,
+                        props.resolved_theme,
+                    );
+                }
                 let (status_label, status_color) = friendly_status_badge(props.status);
                 ui.label(
                     egui::RichText::new(status_label)
@@ -799,11 +818,13 @@ pub fn render_workspace_folder_bar(
     backend: &WorkspaceBackend,
     allowed_root: Option<&Path>,
     sandbox_enabled: bool,
+    resolved_theme: &ResolvedTheme,
 ) -> Option<ToolbarAction> {
     let mut action = None;
+    let chrome = ThemeChromeColors::from_theme(resolved_theme);
     let frame = egui::Frame::new()
-        .fill(Color32::from_rgb(16, 19, 28))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(32, 36, 48)))
+        .fill(chrome.window_bg)
+        .stroke(Stroke::new(1.0, chrome.panel_stroke))
         .inner_margin(Vec2::new(8.0, 3.0));
 
     frame.show(ui, |ui| {
