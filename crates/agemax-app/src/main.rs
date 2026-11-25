@@ -5,26 +5,28 @@ mod chrome_ui;
 mod command_palette;
 mod folder_picker;
 mod ipc_bridge;
+mod mission_control;
 mod mouse_ux;
 mod notification_win;
 mod onboarding_settings;
 mod sidebar;
 mod stretch_panels;
 mod tab_bar;
+mod telemetry;
 mod visual_alive;
 mod webview_pane;
 
-use agemax_agy::acp::LiveAcpSession;
+use agemax_agy::acp::{AcpEvent, LiveAcpSession};
 use agemax_agy::adapter::{AgentAdapter, AgentLaunchPreset, AntigravityAdapter};
 use agemax_agy::osc::{AgentOscEvent, OscParser};
 use agemax_agy::profile::{ProfileConfig, ProfileManager};
 use agemax_config::hot_reload::ConfigWatcher;
 use agemax_config::keybindings::{KeyChord, KeyCode};
-use agemax_config::safety::{resolve_startup_directory, validate_workspace_path};
+use agemax_config::safety::{display_clean_path, resolve_startup_directory, validate_workspace_path};
 use agemax_config::schema::{AgeMaxConfig, UiMode};
 use agemax_core::layout::{Direction, LayoutTree, PaneId, SplitDirection, WorkspaceId};
 use agemax_core::model::{Point, Rect as CoreRect, TeamRoleMeta, TerminalSize};
-use agemax_core::notification::NotificationStore;
+use agemax_core::notification::{ActivityFeed, NotificationStore};
 use agemax_core::session::{
     LayoutSnapshot, PaneSnapshot, SessionSnapshot, TabSnapshot, WorkspaceSnapshot,
 };
@@ -45,6 +47,11 @@ use chrome_ui::{
 use command_palette::{CommandPalette, PaletteAction};
 use eframe::egui::{self, Color32, FontId, Key, Pos2, Rect, Stroke, StrokeKind, Vec2};
 use ipc_bridge::{start_ipc_server, IpcAppCommand};
+use mission_control::{
+    render_agents_grid, render_right_drawer, render_welcome_view, BroadcastModal,
+    BroadcastSubmitRequest, BroadcastTarget, GridPaneCard, GridViewAction, RightDrawerAction,
+    RightDrawerTab, WelcomeAction,
+};
 use mouse_ux::{
     color32_from_rgb, render_context_menu, render_pane_exit_banner, render_session_restore_banner,
     viewport_cell_at_pos, ActiveSplitDrag, ContextMenuAction, ContextMenuState, ExitBannerAction,
@@ -64,6 +71,7 @@ use stretch_panels::{
     TeamLauncherModal,
 };
 use tab_bar::{render_tab_bar, TabBarAction};
+use telemetry::{infer_pty_tool_hint, GitStatsPoller, PaneTelemetry};
 use uuid::Uuid;
 use visual_alive::PaneVisualAnimator;
 use webview_pane::{render_browser_pane, BrowserPaneAction, WebViewSurface};
@@ -146,7 +154,10 @@ pub struct AgeMaxApp {
     osc_parsers: HashMap<PaneId, OscParser>,
     pane_status: HashMap<PaneId, AgentStatus>,
     agent_conversation_ids: HashMap<PaneId, String>,
+    pane_telemetry: HashMap<PaneId, PaneTelemetry>,
+    git_stats_poller: GitStatsPoller,
     notification_store: NotificationStore,
+    activity_feed: ActivityFeed,
     notification_service: Box<dyn NotificationService>,
     ipc_rx: crossbeam_channel::Receiver<IpcAppCommand>,
     config: AgeMaxConfig,
@@ -157,6 +168,7 @@ pub struct AgeMaxApp {
     settings_modal: SettingsModal,
     agent_launcher_modal: AgentLauncherModal,
     team_launcher_modal: TeamLauncherModal,
+    broadcast_modal: BroadcastModal,
     preflight: PreflightState,
     pending_restore: Option<SessionSnapshot>,
     text_selection: Option<TextSelection>,
@@ -168,6 +180,9 @@ pub struct AgeMaxApp {
     pending_window_activate: bool,
     host_hwnd: Option<isize>,
     show_notifications_panel: bool,
+    right_drawer_tab: RightDrawerTab,
+    show_grid_view: bool,
+    show_welcome_view: bool,
     is_sidebar_collapsed: bool,
     font_size: f32,
     char_width: f32,
@@ -274,7 +289,10 @@ impl AgeMaxApp {
             osc_parsers,
             pane_status,
             agent_conversation_ids: HashMap::new(),
+            pane_telemetry: HashMap::new(),
+            git_stats_poller: GitStatsPoller::spawn(cc.map(|c| c.egui_ctx.clone())),
             notification_store,
+            activity_feed: ActivityFeed::new(),
             notification_service: Box::new(PlatformNotificationService::new()),
             ipc_rx,
             config,
@@ -285,6 +303,7 @@ impl AgeMaxApp {
             settings_modal: SettingsModal::default(),
             agent_launcher_modal: AgentLauncherModal::new(),
             team_launcher_modal: TeamLauncherModal::new(),
+            broadcast_modal: BroadcastModal::default(),
             preflight,
             pending_restore,
             text_selection: None,
@@ -296,6 +315,9 @@ impl AgeMaxApp {
             pending_window_activate: false,
             host_hwnd: None,
             show_notifications_panel,
+            right_drawer_tab: RightDrawerTab::default(),
+            show_grid_view: false,
+            show_welcome_view: false,
             is_sidebar_collapsed: false,
             font_size: initial_font_size,
             char_width: 8.4,
@@ -312,6 +334,7 @@ impl AgeMaxApp {
             || self.settings_modal.is_open
             || self.agent_launcher_modal.is_open
             || self.team_launcher_modal.is_open
+            || self.broadcast_modal.is_open
     }
 
     fn remove_pane_resources(&mut self, pane_id: PaneId) {
@@ -322,7 +345,124 @@ impl AgeMaxApp {
         self.osc_parsers.remove(&pane_id);
         self.pane_status.remove(&pane_id);
         self.agent_conversation_ids.remove(&pane_id);
+        self.pane_telemetry.remove(&pane_id);
         self.visual_animator.remove_pane(pane_id);
+    }
+
+    fn record_feed_for_pane(
+        &mut self,
+        pane_id: PaneId,
+        category: &str,
+        summary: impl Into<String>,
+    ) {
+        for ws in &self.workspaces {
+            if ws.tabs.iter().any(|t| t.layout.panes().contains(&pane_id)) {
+                self.activity_feed
+                    .push(ws.id, ws.name.clone(), pane_id, category, summary);
+                return;
+            }
+        }
+    }
+
+    fn gather_broadcast_targets(&self) -> Vec<BroadcastTarget> {
+        let mut out = Vec::new();
+        for ws in &self.workspaces {
+            let (backend_label, folder_display) = match &ws.backend {
+                WorkspaceBackend::Local => (
+                    "Local".to_string(),
+                    display_clean_path(&ws.cwd),
+                ),
+                WorkspaceBackend::Wsl { distro, linux_cwd } => (
+                    format!("WSL:{}", distro.as_deref().unwrap_or("default")),
+                    linux_cwd.as_deref().unwrap_or("~").to_string(),
+                ),
+                WorkspaceBackend::Ssh {
+                    target, remote_dir, ..
+                } => (
+                    format!("SSH:{target}"),
+                    remote_dir.as_deref().unwrap_or("~").to_string(),
+                ),
+            };
+            for tab in &ws.tabs {
+                for pane_id in tab.layout.panes() {
+                    let is_webview = self.webview_panes.contains_key(&pane_id);
+                    let is_ready = if is_webview {
+                        false
+                    } else if let Some(AcpPaneState::Running(sess)) = self.acp_panes.get(&pane_id) {
+                        sess.state.session_id.is_some()
+                    } else if let Some(surf) = self.surfaces.get(&pane_id) {
+                        !surf.has_exited()
+                    } else {
+                        false
+                    };
+                    let status = self
+                        .pane_status
+                        .get(&pane_id)
+                        .copied()
+                        .unwrap_or(AgentStatus::Idle);
+                    out.push(BroadcastTarget {
+                        pane_id,
+                        workspace_name: ws.name.clone(),
+                        tab_title: tab.title.clone(),
+                        folder_display: folder_display.clone(),
+                        backend_label: backend_label.clone(),
+                        is_ready,
+                        status,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    fn execute_broadcast(&mut self, req: BroadcastSubmitRequest) {
+        let trimmed = req.prompt.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let mut delivered = 0usize;
+        for pid in req.target_panes {
+            if let Some(AcpPaneState::Running(sess)) = self.acp_panes.get_mut(&pid) {
+                if sess.send_prompt(trimmed).is_ok() {
+                    delivered += 1;
+                    self.pane_status.insert(pid, AgentStatus::Thinking);
+                }
+            } else if let Some(surface) = self.surfaces.get_mut(&pid) {
+                if !surface.has_exited() {
+                    let payload = if req.append_enter {
+                        format!("{trimmed}\r")
+                    } else {
+                        trimmed.to_string()
+                    };
+                    if surface.send_input(payload.as_bytes()).is_ok() {
+                        delivered += 1;
+                    }
+                }
+            }
+        }
+        if let Some(ws) = self.active_workspace() {
+            if let Some(pid) = ws.active_pane_id() {
+                self.activity_feed.push(
+                    ws.id,
+                    ws.name.clone(),
+                    pid,
+                    "broadcast",
+                    format!("Sent prompt to {delivered} session(s)"),
+                );
+            }
+        }
+    }
+
+    fn launch_quick_preset_in_active_pane(&mut self, preset: AgentLaunchPreset) {
+        if let Some(pane_id) = self.active_pane_id() {
+            self.launch_agent_request(AgentLaunchRequest {
+                target_pane: pane_id,
+                preset,
+                profile: ProfileConfig::default_mode_a(),
+                sandbox: self.config.general.enforce_agy_sandbox,
+            });
+            self.show_welcome_view = false;
+        }
     }
 
     fn spawn_surface_for_backend(
@@ -1100,6 +1240,22 @@ impl AgeMaxApp {
             PaletteAction::LaunchTeamGrid => {
                 self.team_launcher_modal.open();
             }
+            PaletteAction::ToggleGridView => {
+                self.show_grid_view = !self.show_grid_view;
+                if self.show_grid_view {
+                    self.show_welcome_view = false;
+                }
+            }
+            PaletteAction::OpenBroadcast => {
+                let targets = self.gather_broadcast_targets();
+                self.broadcast_modal.open(&targets);
+            }
+            PaletteAction::OpenWelcome => {
+                self.show_welcome_view = !self.show_welcome_view;
+                if self.show_welcome_view {
+                    self.show_grid_view = false;
+                }
+            }
             PaletteAction::ToggleUiMode => {
                 let next = match self.config.general.ui_mode {
                     UiMode::Guided => UiMode::Minimal,
@@ -1522,7 +1678,9 @@ impl AgeMaxApp {
         let focused_pane_id = self.active_pane_id();
         let focused_is_terminal = focused_pane_id
             .map(|id| {
-                !self.webview_panes.contains_key(&id)
+                !self.show_welcome_view
+                    && !self.show_grid_view
+                    && !self.webview_panes.contains_key(&id)
                     && !self.acp_panes.contains_key(&id)
                     && !ctx.egui_wants_keyboard_input()
             })
@@ -1798,27 +1956,112 @@ impl eframe::App for AgeMaxApp {
             ctx.request_repaint();
         }
 
-        // 3. Process output for all active surfaces and live ACP panels
+        // 3. Process output, throttled git diff stats, ACP events, and per-pane activity telemetry
+        let now_instant = Instant::now();
+        let ws_git_targets: Vec<(WorkspaceId, PathBuf)> = self
+            .workspaces
+            .iter()
+            .filter(|w| matches!(w.backend, WorkspaceBackend::Local))
+            .map(|w| (w.id, w.cwd.clone()))
+            .collect();
+        self.git_stats_poller
+            .poll_and_maybe_refresh(|| ws_git_targets, now_instant);
+
         let mut dirty = false;
-        for acp_state in self.acp_panes.values_mut() {
+        let mut acp_events_to_record: Vec<(PaneId, AcpEvent, AgentStatus)> = Vec::new();
+        for (&pane_id, acp_state) in self.acp_panes.iter_mut() {
             if let AcpPaneState::Running(ref mut sess) = acp_state {
-                if sess.poll() {
+                let evs = sess.poll_events();
+                if !evs.is_empty() {
                     dirty = true;
+                    let next_status = sess.state.agent_status();
+                    self.pane_status.insert(pane_id, next_status);
+                    if let Some(tel) = self.pane_telemetry.get_mut(&pane_id) {
+                        tel.heuristic_active = false;
+                    }
+                    for ev in evs {
+                        acp_events_to_record.push((pane_id, ev, next_status));
+                    }
                 }
             }
         }
-        let mut events_to_process = Vec::new();
+        for (pane_id, ev, next_status) in acp_events_to_record {
+            match ev {
+                AcpEvent::ToolCallStarted { tool, .. } => {
+                    self.record_feed_for_pane(pane_id, "tool", format!("Running tool: {tool}"));
+                }
+                AcpEvent::ArtifactCreated { title, .. } => {
+                    self.record_feed_for_pane(pane_id, "artifact", format!("Created {title}"));
+                }
+                AcpEvent::PromptCompleted => {
+                    self.record_feed_for_pane(pane_id, "agent", "Finished ACP turn");
+                    if let Some(ws_id) = self.find_workspace_for_pane(pane_id) {
+                        self.notification_store.notify(
+                            ws_id,
+                            pane_id,
+                            next_status,
+                            "ACP agent turn completed",
+                        );
+                        self.dispatch_attention_alerts(ws_id);
+                    }
+                }
+                AcpEvent::ProcessExited { message } => {
+                    self.record_feed_for_pane(pane_id, "agent", message);
+                }
+                _ => {}
+            }
+        }
 
+        let mut events_to_process = Vec::new();
         for (&pane_id, surface) in self.surfaces.iter_mut() {
             let parser = self.osc_parsers.entry(pane_id).or_default();
-            if surface.process_output_with(|chunk| {
+            let tel = self
+                .pane_telemetry
+                .entry(pane_id)
+                .or_insert_with(|| PaneTelemetry::new(now_instant));
+            let mut inferred_hint: Option<AgentStatus> = None;
+            let got_bytes = surface.process_output_with(|chunk| {
+                tel.record_bytes(chunk.len(), now_instant);
+                if let Some(h) = infer_pty_tool_hint(chunk) {
+                    inferred_hint = Some(h);
+                }
                 let evs = parser.parse(chunk);
                 if !evs.is_empty() {
                     events_to_process.push((pane_id, evs));
                 }
-            }) {
+            });
+            if got_bytes {
                 dirty = true;
+                tel.last_output_line = surface.last_non_empty_line();
+                if let Some(hint) = inferred_hint {
+                    let cur = self.pane_status.get(&pane_id).copied().unwrap_or(AgentStatus::Idle);
+                    if cur == AgentStatus::Idle || tel.heuristic_active {
+                        self.pane_status.insert(pane_id, hint);
+                        tel.heuristic_active = true;
+                    }
+                }
             }
+        }
+
+        // Decay heuristic PTY burst back to Idle when silent and roll sparkline buckets forward
+        let pane_ids_all: Vec<PaneId> = self.pane_status.keys().copied().collect();
+        for pane_id in pane_ids_all {
+            let status = self.pane_status.get(&pane_id).copied().unwrap_or(AgentStatus::Idle);
+            let tel = self
+                .pane_telemetry
+                .entry(pane_id)
+                .or_insert_with(|| PaneTelemetry::new(now_instant));
+            tel.advance_time(now_instant);
+            if tel.heuristic_active && status.is_working() {
+                if let Some(last_at) = tel.last_pty_output_at {
+                    if now_instant.saturating_duration_since(last_at).as_secs_f32() >= 2.2 {
+                        tel.heuristic_active = false;
+                        self.pane_status.insert(pane_id, AgentStatus::Idle);
+                    }
+                }
+            }
+            let updated_status = self.pane_status.get(&pane_id).copied().unwrap_or(AgentStatus::Idle);
+            tel.sync_status(updated_status, now_instant);
         }
 
         for (pane_id, events) in events_to_process {
@@ -1826,12 +2069,21 @@ impl eframe::App for AgeMaxApp {
                 match event {
                     AgentOscEvent::StatusChange { status, message } => {
                         self.pane_status.insert(pane_id, status);
+                        if let Some(tel) = self.pane_telemetry.get_mut(&pane_id) {
+                            tel.heuristic_active = false;
+                            tel.sync_status(status, now_instant);
+                        }
                         if status.is_attention_needed() {
                             if let Some(ws_id) = self.find_workspace_for_pane(pane_id) {
                                 let msg =
                                     message.unwrap_or_else(|| status.display_name().to_string());
                                 self.notification_store.notify(ws_id, pane_id, status, &msg);
+                                self.record_feed_for_pane(pane_id, "agent", msg);
                                 self.dispatch_attention_alerts(ws_id);
+                            }
+                        } else if status == AgentStatus::RunningTool {
+                            if let Some(ref msg) = message {
+                                self.record_feed_for_pane(pane_id, "tool", msg.clone());
                             }
                         }
                     }
@@ -1844,6 +2096,7 @@ impl eframe::App for AgeMaxApp {
                                 AgentStatus::WaitingForInput,
                                 &formatted,
                             );
+                            self.record_feed_for_pane(pane_id, "agent", &formatted);
                             self.dispatch_attention_alerts(ws_id);
                         }
                     }
@@ -1900,7 +2153,7 @@ impl eframe::App for AgeMaxApp {
         let full_frame = egui::Frame::new().fill(color32_from_rgb(resolved_theme.background));
         full_frame.show(ui, |ui| {
             ui.horizontal(|ui| {
-                // Prepare sidebar metadata
+                // Prepare mission-control sidebar metadata
                 let sidebar_meta: Vec<SidebarWorkspaceMeta> = self
                     .workspaces
                     .iter()
@@ -1911,12 +2164,17 @@ impl eframe::App for AgeMaxApp {
                             .notification_store
                             .latest_unread_for_workspace(ws.id)
                             .map(|i| i.message.clone());
-                        let status = ws
-                            .active_pane_id()
-                            .and_then(|pid| self.pane_status.get(&pid).copied());
+                        let active_pid = ws.active_pane_id();
+                        let status =
+                            active_pid.and_then(|pid| self.pane_status.get(&pid).copied());
+                        let tel = active_pid.and_then(|pid| self.pane_telemetry.get(&pid));
                         SidebarWorkspaceMeta {
                             unread_count,
                             latest_snippet,
+                            last_output_line: tel.and_then(|t| t.last_output_line.clone()),
+                            working_elapsed_secs: tel.and_then(|t| t.working_elapsed_secs(now_instant)),
+                            git_stats: self.git_stats_poller.cached.get(&ws.id).copied(),
+                            sparkline: tel.map(|t| t.sparkline).unwrap_or_default(),
                             status,
                         }
                     })
@@ -2001,6 +2259,22 @@ impl eframe::App for AgeMaxApp {
                             }
                             ToolbarAction::LaunchTeamGrid => {
                                 self.team_launcher_modal.open();
+                            }
+                            ToolbarAction::ToggleGridView => {
+                                self.show_grid_view = !self.show_grid_view;
+                                if self.show_grid_view {
+                                    self.show_welcome_view = false;
+                                }
+                            }
+                            ToolbarAction::OpenBroadcast => {
+                                let targets = self.gather_broadcast_targets();
+                                self.broadcast_modal.open(&targets);
+                            }
+                            ToolbarAction::OpenWelcome => {
+                                self.show_welcome_view = !self.show_welcome_view;
+                                if self.show_welcome_view {
+                                    self.show_grid_view = false;
+                                }
                             }
                             ToolbarAction::OpenCommandPalette => self.command_palette.open(),
                             ToolbarAction::ToggleNotifications => {
@@ -2158,8 +2432,155 @@ impl eframe::App for AgeMaxApp {
                     let secondary_clicked = ui.input(|i| i.pointer.secondary_clicked());
                     let mut scrollback_target: Option<(PaneId, i32)> = None;
 
-                    if !self.is_modal_open() && !self.context_menu.is_open && raw_scroll_y.abs() > 0.1
-                    {
+                    let mut visible_webviews: HashSet<PaneId> = HashSet::new();
+                    let mut pending_pane_action: Option<PaneHeaderAction> = None;
+                    let mut pending_exit_action: Option<ExitBannerAction> = None;
+                    let mut pending_browser_action: Option<BrowserPaneAction> = None;
+                    let mut pending_acp_action: Option<AcpPaneAction> = None;
+                    let mut clicked_focus_pane: Option<PaneId> = None;
+                    let mut url_to_open: Option<String> = None;
+
+                    if self.show_welcome_view {
+                        let recent_snap =
+                            SessionSnapshot::load_from_file(&SessionSnapshot::default_path()).ok();
+                        let active_cwd = self
+                            .active_workspace()
+                            .map(|w| w.cwd.clone())
+                            .unwrap_or_else(|| PathBuf::from("."));
+                        if let Some(w_act) = render_welcome_view(
+                            ui,
+                            recent_snap.as_ref(),
+                            &active_cwd,
+                            &resolved_theme,
+                        ) {
+                            match w_act {
+                                WelcomeAction::LaunchNewAgent => {
+                                    self.launch_quick_preset_in_active_pane(
+                                        AgentLaunchPreset::NewSession,
+                                    );
+                                }
+                                WelcomeAction::LaunchSafePlanAgent => {
+                                    self.launch_quick_preset_in_active_pane(
+                                        AgentLaunchPreset::SafePlanMode,
+                                    );
+                                }
+                                WelcomeAction::LaunchTeamGrid => {
+                                    self.show_welcome_view = false;
+                                    self.team_launcher_modal.open();
+                                }
+                                WelcomeAction::OpenNewWorkspaceModal => {
+                                    self.show_welcome_view = false;
+                                    self.open_new_workspace_modal();
+                                }
+                                WelcomeAction::RestoreRecentWorkspace(path) => {
+                                    if let Some(pos) = self
+                                        .workspaces
+                                        .iter()
+                                        .position(|w| paths_match(&w.cwd, &path))
+                                    {
+                                        self.active_workspace_index = pos;
+                                        self.show_welcome_view = false;
+                                    } else {
+                                        let name = path
+                                            .file_name()
+                                            .and_then(|n| n.to_str())
+                                            .unwrap_or("Workspace")
+                                            .to_string();
+                                        let _ = self.create_workspace_in_dir(name, path, false);
+                                        self.show_welcome_view = false;
+                                    }
+                                }
+                                WelcomeAction::Dismiss => {
+                                    self.show_welcome_view = false;
+                                }
+                            }
+                        }
+                    } else if self.show_grid_view {
+                        let mut grid_cards = Vec::new();
+                        for (w_idx, ws) in self.workspaces.iter().enumerate() {
+                            for (t_idx, tab) in ws.tabs.iter().enumerate() {
+                                for pid in tab.layout.panes() {
+                                    let status = self
+                                        .pane_status
+                                        .get(&pid)
+                                        .copied()
+                                        .unwrap_or(AgentStatus::Idle);
+                                    let is_focused = w_idx == active_ws_idx
+                                        && t_idx == ws.active_tab_index
+                                        && pid == tab.active_pane;
+                                    let tel = self.pane_telemetry.get(&pid);
+                                    let kind_label = if self.acp_panes.contains_key(&pid) {
+                                        "ACP Panel"
+                                    } else if self.webview_panes.contains_key(&pid) {
+                                        "Browser"
+                                    } else {
+                                        "Terminal"
+                                    };
+                                    let last_line = if let Some(AcpPaneState::Running(s)) =
+                                        self.acp_panes.get(&pid)
+                                    {
+                                        s.state
+                                            .latest_message
+                                            .lines()
+                                            .rev()
+                                            .find(|l| !l.trim().is_empty())
+                                            .map(|l| l.trim().to_string())
+                                            .or_else(|| s.state.latest_status.clone())
+                                    } else {
+                                        tel.and_then(|t| t.last_output_line.clone())
+                                    };
+                                    grid_cards.push(GridPaneCard {
+                                        workspace_index: w_idx,
+                                        workspace_name: ws.name.clone(),
+                                        tab_index: t_idx,
+                                        tab_title: tab.title.clone(),
+                                        pane_id: pid,
+                                        status,
+                                        is_focused,
+                                        git_branch: ws.git_branch.clone(),
+                                        git_stats: self
+                                            .git_stats_poller
+                                            .cached
+                                            .get(&ws.id)
+                                            .copied(),
+                                        last_line,
+                                        elapsed_secs: tel
+                                            .and_then(|t| t.working_elapsed_secs(now_instant)),
+                                        sparkline: tel.map(|t| t.sparkline).unwrap_or_default(),
+                                        kind_label,
+                                    });
+                                }
+                            }
+                        }
+
+                        if let Some(g_act) =
+                            render_agents_grid(ui, &grid_cards, &resolved_theme)
+                        {
+                            match g_act {
+                                GridViewAction::FocusPane {
+                                    workspace_index,
+                                    tab_index,
+                                    pane_id,
+                                } => {
+                                    self.active_workspace_index = workspace_index;
+                                    if let Some(ws) = self.workspaces.get_mut(workspace_index) {
+                                        ws.active_tab_index =
+                                            tab_index.min(ws.tabs.len().saturating_sub(1));
+                                        if let Some(tab) = ws.active_tab_mut() {
+                                            tab.active_pane = pane_id;
+                                        }
+                                    }
+                                    self.notification_store.mark_pane_read(pane_id);
+                                    self.show_grid_view = false;
+                                }
+                                GridViewAction::ExitGridView => {
+                                    self.show_grid_view = false;
+                                }
+                            }
+                        }
+                    } else {
+                        if !self.is_modal_open() && !self.context_menu.is_open && raw_scroll_y.abs() > 0.1
+                        {
                         if mods_now.ctrl {
                             let step = if raw_scroll_y > 0.0 { 1.0 } else { -1.0 };
                             self.adjust_font_zoom(step);
@@ -2297,13 +2718,6 @@ impl eframe::App for AgeMaxApp {
                     // 3. Render panes inside the tab layout
                     let show_pane_headers = self.config.general.effective_show_pane_headers();
                     let show_hints = self.config.general.effective_show_shortcut_hints();
-                    let mut pending_pane_action: Option<PaneHeaderAction> = None;
-                    let mut pending_exit_action: Option<ExitBannerAction> = None;
-                    let mut pending_browser_action: Option<BrowserPaneAction> = None;
-                    let mut pending_acp_action: Option<AcpPaneAction> = None;
-                    let mut visible_webviews: HashSet<PaneId> = HashSet::new();
-                    let mut clicked_focus_pane: Option<PaneId> = None;
-                    let mut url_to_open: Option<String> = None;
                     let modal_or_menu_open = self.is_modal_open() || self.context_menu.is_open;
                     let host_hwnd = self.host_hwnd;
                     let pane_bg_color = color32_from_rgb(resolved_theme.background);
@@ -2757,6 +3171,7 @@ impl eframe::App for AgeMaxApp {
                             }
                         }
                     }
+                    }
 
                     // Hide WebView2 native child HWNDs for inactive tabs/workspaces or obstructed panes.
                     for (&wv_pid, wv) in &mut self.webview_panes {
@@ -2839,83 +3254,41 @@ impl eframe::App for AgeMaxApp {
                     }
                 });
 
-                // 3. Optional Right-Side Notification History Panel (Ctrl+Shift+N)
+                // 3. Optional Right-Side Notification & Activity Feed Drawer (Ctrl+Shift+N)
                 if self.show_notifications_panel {
-                    ui.allocate_ui(Vec2::new(260.0, ui.available_height()), |ui| {
-                        let frame = egui::Frame::new()
-                            .fill(Color32::from_rgb(22, 24, 34))
-                            .stroke(Stroke::new(1.0, Color32::from_rgb(40, 44, 60)))
-                            .inner_margin(8.0);
-
-                        frame.show(ui, |ui| {
-                            ui.heading(
-                                egui::RichText::new("NOTIFICATIONS")
-                                    .size(12.0)
-                                    .color(Color32::from_rgb(160, 165, 180))
-                                    .strong(),
-                            );
-                            ui.separator();
-                            ui.add_space(4.0);
-
-                            let unread = self.notification_store.unread_items();
-                            if unread.is_empty() {
-                                ui.label(
-                                    egui::RichText::new("All caught up! No unread notifications.")
-                                        .size(11.0)
-                                        .color(Color32::GRAY),
-                                );
-                            } else {
-                                let mut jump_target = None;
-                                for item in unread {
-                                    ui.group(|ui| {
-                                        let status_color = match item.status {
-                                            AgentStatus::WaitingForInput => {
-                                                Color32::from_rgb(245, 175, 45)
-                                            }
-                                            AgentStatus::Done => Color32::from_rgb(45, 200, 110),
-                                            AgentStatus::Failed => Color32::from_rgb(235, 60, 60),
-                                            _ => Color32::WHITE,
-                                        };
-
-                                        ui.label(
-                                            egui::RichText::new(format!(
-                                                "{} {}",
-                                                item.status.icon(),
-                                                item.status.display_name()
-                                            ))
-                                            .size(11.0)
-                                            .color(status_color)
-                                            .strong(),
-                                        );
-                                        ui.label(
-                                            egui::RichText::new(&item.message)
-                                                .size(11.0)
-                                                .color(Color32::from_rgb(200, 205, 220)),
-                                        );
-
-                                        if ui.button("Focus Pane").clicked() {
-                                            jump_target = Some((item.workspace_id, item.pane_id));
+                    let unread = self.notification_store.unread_items();
+                    let recent_feed = self.activity_feed.recent(40);
+                    if let Some(drawer_act) = render_right_drawer(
+                        ui,
+                        self.right_drawer_tab,
+                        &unread,
+                        &recent_feed,
+                        &resolved_theme,
+                    ) {
+                        match drawer_act {
+                            RightDrawerAction::SwitchTab(tab) => {
+                                self.right_drawer_tab = tab;
+                            }
+                            RightDrawerAction::FocusPane(ws_id, pane_id) => {
+                                if let Some(pos) =
+                                    self.workspaces.iter().position(|w| w.id == ws_id)
+                                {
+                                    self.active_workspace_index = pos;
+                                    if let Some(ws) = self.workspaces.get_mut(pos) {
+                                        if let Some(tab) = ws.active_tab_mut() {
+                                            tab.active_pane = pane_id;
                                         }
-                                    });
-                                    ui.add_space(4.0);
-                                }
-
-                                if let Some((ws_id, pane_id)) = jump_target {
-                                    if let Some(pos) =
-                                        self.workspaces.iter().position(|w| w.id == ws_id)
-                                    {
-                                        self.active_workspace_index = pos;
-                                        if let Some(ws) = self.workspaces.get_mut(pos) {
-                                            if let Some(tab) = ws.active_tab_mut() {
-                                                tab.active_pane = pane_id;
-                                            }
-                                        }
-                                        self.notification_store.mark_pane_read(pane_id);
                                     }
+                                    self.notification_store.mark_pane_read(pane_id);
+                                    self.show_grid_view = false;
+                                    self.show_welcome_view = false;
                                 }
                             }
-                        });
-                    });
+                            RightDrawerAction::ClearFeed => {
+                                self.activity_feed.clear();
+                            }
+                        }
+                    }
                 }
 
                 // 4. Command Palette (Ctrl+Shift+P)
@@ -2985,6 +3358,14 @@ impl eframe::App for AgeMaxApp {
                 // 7c. Multi-Agent Team Grid Launcher (Unit 7 §C)
                 if let Some(team_req) = self.team_launcher_modal.show(ui.ctx()) {
                     self.launch_team_grid(team_req);
+                }
+
+                // 7d. Safe Multi-Session Prompt Broadcast Modal (REQ-088)
+                if self.broadcast_modal.is_open {
+                    let targets = self.gather_broadcast_targets();
+                    if let Some(b_req) = self.broadcast_modal.show(ui.ctx(), &targets) {
+                        self.execute_broadcast(b_req);
+                    }
                 }
 
                 // 8. Right-Click Context Menu overlay (Copy / Paste / Clear / Split)

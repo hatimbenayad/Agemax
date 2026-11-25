@@ -168,6 +168,10 @@ fn parse_osc_7501(payload: &str) -> Option<AgentOscEvent> {
                         "waiting" | "waiting_for_input" | "waiting-for-input" | "prompt" => {
                             Some(AgentStatus::WaitingForInput)
                         }
+                        "thinking" | "planning" => Some(AgentStatus::Thinking),
+                        "tool" | "running_tool" | "running-tool" | "executing" => {
+                            Some(AgentStatus::RunningTool)
+                        }
                         "working" | "busy" | "running" => Some(AgentStatus::Working),
                         "done" | "completed" | "success" => Some(AgentStatus::Done),
                         "failed" | "error" => Some(AgentStatus::Failed),
@@ -309,6 +313,27 @@ mod tests {
                 title: "Antigravity".to_string(),
                 message: "Tests passing".to_string(),
             }]
+        );
+    }
+
+    #[test]
+    fn test_osc_7501_thinking_and_tool_states() {
+        let mut parser = OscParser::new();
+        let events = parser.parse(
+            b"\x1b]7501;status=thinking\x07\x1b]7501;status=tool;summary=Running cargo test\x07",
+        );
+        assert_eq!(
+            events,
+            vec![
+                AgentOscEvent::StatusChange {
+                    status: AgentStatus::Thinking,
+                    message: None,
+                },
+                AgentOscEvent::StatusChange {
+                    status: AgentStatus::RunningTool,
+                    message: Some("Running cargo test".to_string()),
+                },
+            ]
         );
     }
 }

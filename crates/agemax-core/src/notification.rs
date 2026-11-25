@@ -80,3 +80,59 @@ impl NotificationStore {
         self.items.iter().filter(|i| !i.read).collect()
     }
 }
+
+/// Chronological workspace milestone shown in the Global Activity Feed (`REQ-088`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityFeedEntry {
+    pub id: Uuid,
+    pub workspace_id: WorkspaceId,
+    pub workspace_name: String,
+    pub pane_id: PaneId,
+    pub category: String,
+    pub summary: String,
+    pub timestamp: SystemTime,
+}
+
+#[derive(Debug, Default)]
+pub struct ActivityFeed {
+    entries: Vec<ActivityFeedEntry>,
+}
+
+impl ActivityFeed {
+    const MAX_ENTRIES: usize = 100;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push(
+        &mut self,
+        workspace_id: WorkspaceId,
+        workspace_name: impl Into<String>,
+        pane_id: PaneId,
+        category: impl Into<String>,
+        summary: impl Into<String>,
+    ) {
+        self.entries.push(ActivityFeedEntry {
+            id: Uuid::new_v4(),
+            workspace_id,
+            workspace_name: workspace_name.into(),
+            pane_id,
+            category: category.into(),
+            summary: summary.into(),
+            timestamp: SystemTime::now(),
+        });
+        if self.entries.len() > Self::MAX_ENTRIES {
+            let excess = self.entries.len() - Self::MAX_ENTRIES;
+            self.entries.drain(0..excess);
+        }
+    }
+
+    pub fn recent(&self, limit: usize) -> Vec<&ActivityFeedEntry> {
+        self.entries.iter().rev().take(limit).collect()
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+}

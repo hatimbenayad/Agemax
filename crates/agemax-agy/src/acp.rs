@@ -128,6 +128,22 @@ impl AcpCardState {
             }
         }
     }
+
+    /// Derive structured agent state from current ACP turn & active tool calls (`REQ-087`).
+    pub fn agent_status(&self) -> agemax_core::status::AgentStatus {
+        if self.exited_message.is_some() {
+            return agemax_core::status::AgentStatus::Idle;
+        }
+        if !self.active_tools.is_empty() {
+            agemax_core::status::AgentStatus::RunningTool
+        } else if self.is_turn_active {
+            agemax_core::status::AgentStatus::Thinking
+        } else if !self.latest_message.is_empty() {
+            agemax_core::status::AgentStatus::Done
+        } else {
+            agemax_core::status::AgentStatus::Idle
+        }
+    }
 }
 
 pub fn build_acp_initialize_request(id: u64) -> String {
@@ -447,11 +463,15 @@ impl LiveAcpSession {
     }
 
     pub fn poll(&mut self) -> bool {
-        let mut updated = false;
+        !self.poll_events().is_empty()
+    }
+
+    pub fn poll_events(&mut self) -> Vec<AcpEvent> {
+        let mut events = Vec::new();
         while let Ok(ev) = self.rx.try_recv() {
             let just_initialized = matches!(ev, AcpEvent::Initialized { .. });
             self.state.apply(&ev);
-            updated = true;
+            events.push(ev);
 
             if just_initialized && !self.session_requested {
                 self.session_requested = true;
@@ -462,7 +482,7 @@ impl LiveAcpSession {
                 let _ = self.stdin.flush();
             }
         }
-        updated
+        events
     }
 
     pub fn send_prompt(&mut self, text: &str) -> Result<(), String> {

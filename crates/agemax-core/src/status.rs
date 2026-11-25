@@ -6,6 +6,8 @@ pub enum AgentStatus {
     #[default]
     Idle,
     Working,
+    Thinking,
+    RunningTool,
     WaitingForInput,
     Done,
     Failed,
@@ -16,10 +18,16 @@ impl AgentStatus {
         matches!(self, Self::WaitingForInput | Self::Done | Self::Failed)
     }
 
+    pub fn is_working(&self) -> bool {
+        matches!(self, Self::Working | Self::Thinking | Self::RunningTool)
+    }
+
     pub fn display_name(&self) -> &'static str {
         match self {
             Self::Idle => "Idle",
             Self::Working => "Working",
+            Self::Thinking => "Thinking",
+            Self::RunningTool => "Running tool",
             Self::WaitingForInput => "Waiting for input",
             Self::Done => "Done",
             Self::Failed => "Failed",
@@ -30,6 +38,8 @@ impl AgentStatus {
         match self {
             Self::Idle => "○",
             Self::Working => "⚡",
+            Self::Thinking => "◐",
+            Self::RunningTool => "⚙",
             Self::WaitingForInput => "⚠",
             Self::Done => "✓",
             Self::Failed => "✕",

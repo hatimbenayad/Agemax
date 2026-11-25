@@ -1,14 +1,33 @@
 use agemax_core::layout::{PaneId, WorkspaceId};
-use agemax_core::notification::NotificationStore;
+use agemax_core::notification::{ActivityFeed, NotificationStore};
 use agemax_core::status::AgentStatus;
 
 #[test]
 fn test_agent_status_properties() {
     assert!(!AgentStatus::Idle.is_attention_needed());
     assert!(!AgentStatus::Working.is_attention_needed());
+    assert!(!AgentStatus::Thinking.is_attention_needed());
+    assert!(!AgentStatus::RunningTool.is_attention_needed());
+    assert!(AgentStatus::Thinking.is_working());
+    assert!(AgentStatus::RunningTool.is_working());
+    assert!(AgentStatus::Working.is_working());
     assert!(AgentStatus::WaitingForInput.is_attention_needed());
     assert!(AgentStatus::Done.is_attention_needed());
     assert!(AgentStatus::Failed.is_attention_needed());
+}
+
+#[test]
+fn test_activity_feed_ring_and_order() {
+    let mut feed = ActivityFeed::new();
+    let ws = WorkspaceId::new();
+    let pane = PaneId::new();
+    feed.push(ws, "Workspace 1", pane, "tool", "Ran read_file");
+    feed.push(ws, "Workspace 1", pane, "agent", "Finished tests");
+
+    let items = feed.recent(10);
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].summary, "Finished tests");
+    assert_eq!(items[1].summary, "Ran read_file");
 }
 
 #[test]

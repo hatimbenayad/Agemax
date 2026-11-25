@@ -24,6 +24,9 @@ pub enum ToolbarAction {
     OpenBrowserPane,
     OpenAcpPanel,
     LaunchTeamGrid,
+    ToggleGridView,
+    OpenBroadcast,
+    OpenWelcome,
     OpenCommandPalette,
     ToggleNotifications,
     OpenViewSettings,
@@ -622,6 +625,36 @@ pub fn render_top_toolbar(
                 action = Some(ToolbarAction::LaunchTeamGrid);
             }
 
+            if hint_tooltip(
+                ui.button("⊞ Grid"),
+                show_hints,
+                "Mission Control overview grid of all live sessions",
+            )
+            .clicked()
+            {
+                action = Some(ToolbarAction::ToggleGridView);
+            }
+
+            if hint_tooltip(
+                ui.button("📣 Broadcast"),
+                show_hints,
+                "Send a confirmed prompt to selected live sessions",
+            )
+            .clicked()
+            {
+                action = Some(ToolbarAction::OpenBroadcast);
+            }
+
+            if hint_tooltip(
+                ui.button("🏠 Home"),
+                show_hints,
+                "Open Welcome launcher & recent sessions",
+            )
+            .clicked()
+            {
+                action = Some(ToolbarAction::OpenWelcome);
+            }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let target_mode = match config.general.ui_mode {
                     UiMode::Guided => UiMode::Minimal,
@@ -797,6 +830,8 @@ fn friendly_status_badge(status: AgentStatus) -> (&'static str, Color32) {
     match status {
         AgentStatus::Idle => ("● Ready", Color32::from_rgb(145, 155, 175)),
         AgentStatus::Working => ("⟳ Working…", Color32::from_rgb(105, 175, 255)),
+        AgentStatus::Thinking => ("◐ Thinking…", Color32::from_rgb(115, 200, 255)),
+        AgentStatus::RunningTool => ("⚙ Running Tool…", Color32::from_rgb(245, 195, 85)),
         AgentStatus::WaitingForInput => ("⚠ Needs Answer", Color32::from_rgb(245, 175, 45)),
         AgentStatus::Done => ("✓ Done", Color32::from_rgb(45, 200, 110)),
         AgentStatus::Failed => ("✕ Error", Color32::from_rgb(235, 60, 60)),
