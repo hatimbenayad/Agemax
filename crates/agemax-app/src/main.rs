@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app_icon;
+mod backdrop_win;
 mod chrome_ui;
 mod command_palette;
 mod folder_picker;
@@ -41,6 +42,7 @@ use agemax_term::metadata::detect_git_branch;
 use agemax_term::surface::TerminalSurface;
 use agemax_term::vt::GridPoint;
 use agemax_term::PtySystemBackend;
+use backdrop_win::BackdropController;
 use chrome_ui::{
     render_pane_header, render_top_toolbar, render_workspace_folder_bar, NewWorkspaceModal,
     NewWorkspaceRequest, PaneHeaderAction, PaneHeaderProps, RenameModal, RenameTarget,
@@ -75,7 +77,7 @@ use stretch_panels::{
 use tab_bar::{render_tab_bar, TabBarAction};
 use telemetry::{infer_pty_tool_hint, GitStatsPoller, PaneTelemetry};
 use uuid::Uuid;
-use visual_alive::PaneVisualAnimator;
+use visual_alive::{PaneRectAnimator, PaneVisualAnimator};
 use webview_pane::{render_browser_pane, BrowserPaneAction, WebViewSurface};
 
 fn main() -> eframe::Result<()> {
@@ -92,10 +94,12 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    let initial_cfg = AgeMaxConfig::load_or_create_default();
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Age Max - Native Agent Multiplexer")
             .with_icon(app_icon::window_icon())
+            .with_transparent(initial_cfg.general.enable_mica_backdrop)
             .with_inner_size([1150.0, 720.0])
             .with_min_inner_size([450.0, 320.0]),
         ..Default::default()
@@ -178,6 +182,8 @@ pub struct AgeMaxApp {
     context_menu: ContextMenuState,
     last_light_visuals: Option<bool>,
     visual_animator: PaneVisualAnimator,
+    rect_animator: PaneRectAnimator,
+    backdrop_ctrl: BackdropController,
     any_pane_animating: bool,
     pending_window_activate: bool,
     host_hwnd: Option<isize>,
@@ -313,6 +319,8 @@ impl AgeMaxApp {
             context_menu: ContextMenuState::default(),
             last_light_visuals: None,
             visual_animator: PaneVisualAnimator::new(),
+            rect_animator: PaneRectAnimator::new(),
+            backdrop_ctrl: BackdropController::default(),
             any_pane_animating: false,
             pending_window_activate: false,
             host_hwnd: None,
@@ -340,6 +348,13 @@ impl AgeMaxApp {
     }
 
     fn remove_pane_resources(&mut self, pane_id: PaneId) {
+        let resolved_theme = self.config.theme.resolved_rgb();
+        self.rect_animator.start_close(
+            pane_id,
+            color32_from_rgb(resolved_theme.background),
+            color32_from_rgb(resolved_theme.active_border),
+            Instant::now(),
+        );
         self.surfaces.remove(&pane_id);
         self.webview_panes.remove(&pane_id);
         self.acp_panes.remove(&pane_id);
@@ -2159,9 +2174,18 @@ impl eframe::App for AgeMaxApp {
             self.last_light_visuals = Some(is_light);
         }
 
+        let mica_active = self
+            .backdrop_ctrl
+            .sync(self.host_hwnd, self.config.general.enable_mica_backdrop);
         let mut any_animating = false;
         let now_instant = Instant::now();
-        let full_frame = egui::Frame::new().fill(color32_from_rgb(resolved_theme.background));
+        let bg_rgb = resolved_theme.background;
+        let window_fill = if mica_active && self.config.general.enable_mica_backdrop {
+            Color32::from_rgba_unmultiplied(bg_rgb.0, bg_rgb.1, bg_rgb.2, 210)
+        } else {
+            color32_from_rgb(bg_rgb)
+        };
+        let full_frame = egui::Frame::new().fill(window_fill);
         full_frame.show(ui, |ui| {
             ui.horizontal(|ui| {
                 // Prepare mission-control sidebar metadata
@@ -2731,7 +2755,11 @@ impl eframe::App for AgeMaxApp {
                     let show_hints = self.config.general.effective_show_shortcut_hints();
                     let modal_or_menu_open = self.is_modal_open() || self.context_menu.is_open;
                     let host_hwnd = self.host_hwnd;
-                    let pane_bg_color = color32_from_rgb(resolved_theme.background);
+                    let pane_bg_color = if mica_active && self.config.general.enable_mica_backdrop {
+                        Color32::from_rgba_unmultiplied(bg_rgb.0, bg_rgb.1, bg_rgb.2, 218)
+                    } else {
+                        color32_from_rgb(resolved_theme.background)
+                    };
                     let default_fg_color = color32_from_rgb(resolved_theme.foreground);
                     let sel_fill = if resolved_theme.is_light_background() {
                         Color32::from_rgba_unmultiplied(60, 120, 225, 80)
@@ -2762,10 +2790,18 @@ impl eframe::App for AgeMaxApp {
 
                             for (pane_id, rect) in pane_rects {
                                 let is_focused = pane_id == focused_pane;
-                                let egui_rect = Rect::from_min_size(
+                                let target_egui_rect = Rect::from_min_size(
                                     Pos2::new(rect.min.x, rect.min.y),
                                     Vec2::new(rect.width(), rect.height()),
                                 );
+                                let rect_anim = self.rect_animator.step(
+                                    pane_id,
+                                    target_egui_rect,
+                                    self.active_split_drag.is_some(),
+                                    now_instant,
+                                );
+                                any_animating |= rect_anim.animating;
+                                let egui_rect = rect_anim.visual_rect;
 
                                 // Pane background and smooth state-colored attention glow (`REQ-084`)
                                 ui.painter().rect_filled(egui_rect, 2.0, pane_bg_color);
@@ -2849,17 +2885,18 @@ impl eframe::App for AgeMaxApp {
 
                                 // Calculate body region below optional header
                                 let pad = 4.0;
-                                let term_top = rect.min.y + header_h;
-                                let term_h = (rect.height() - header_h).max(40.0);
+                                let term_top = egui_rect.min.y + header_h;
                                 let term_rect = Rect::from_min_max(
                                     Pos2::new(egui_rect.min.x, term_top),
                                     egui_rect.max,
                                 );
-                                let inner_w = (rect.width() - (pad * 2.0)).max(50.0);
-                                let inner_h = (term_h - (pad * 2.0)).max(32.0);
-                                let cols = (inner_w / self.char_width).floor() as u16;
-                                let rows = (inner_h / self.char_height).floor() as u16;
-                                let origin = Pos2::new(rect.min.x + pad, term_top + pad);
+                                let target_w = (target_egui_rect.width() - (pad * 2.0)).max(50.0);
+                                let target_h =
+                                    ((target_egui_rect.height() - header_h).max(40.0) - (pad * 2.0))
+                                        .max(32.0);
+                                let cols = (target_w / self.char_width).floor() as u16;
+                                let rows = (target_h / self.char_height).floor() as u16;
+                                let origin = Pos2::new(egui_rect.min.x + pad, term_top + pad);
 
                                 // Handle mouse focus and right-click menu trigger
                                 if !modal_or_menu_open && !divider_dragging_or_hovered {
@@ -2885,7 +2922,8 @@ impl eframe::App for AgeMaxApp {
                                 }
 
                                 if let Some(wv) = self.webview_panes.get_mut(&pane_id) {
-                                    let allow_overlay = !modal_or_menu_open;
+                                    let allow_overlay =
+                                        !modal_or_menu_open && rect_anim.allow_backend_resize;
                                     if allow_overlay {
                                         visible_webviews.insert(pane_id);
                                     }
@@ -2916,11 +2954,13 @@ impl eframe::App for AgeMaxApp {
                                 let mut jump_to_bottom_clicked = false;
 
                                 if let Some(surface) = self.surfaces.get_mut(&pane_id) {
-                                    let new_size = TerminalSize::new(cols, rows);
-                                    let _ = surface.resize(new_size);
+                                    if rect_anim.allow_backend_resize {
+                                        let new_size = TerminalSize::new(cols, rows);
+                                        let _ = surface.resize(new_size);
+                                    }
 
-                                    let cur_rows = surface.rows().min(rows as usize);
-                                    let cur_cols = surface.cols().min(cols as usize);
+                                    let cur_rows = surface.rows();
+                                    let cur_cols = surface.cols();
                                     let scroll_offset = surface.display_offset();
                                     let surface_exited = surface.has_exited();
 
@@ -3014,7 +3054,7 @@ impl eframe::App for AgeMaxApp {
                                         }
                                     }
 
-                                    let painter = ui.painter();
+                                    let painter = ui.painter().with_clip_rect(term_rect);
                                     let active_sel = self.text_selection;
 
                                     for r in 0..cur_rows {
@@ -3180,6 +3220,8 @@ impl eframe::App for AgeMaxApp {
                                     }
                                 }
                             }
+                            any_animating |=
+                                self.rect_animator.render_closing_ghosts(ui.painter(), now_instant);
                         }
                     }
                     }
