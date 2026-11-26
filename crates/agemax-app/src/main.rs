@@ -790,8 +790,12 @@ impl AgeMaxApp {
                 fallback_dir.clone()
             };
             if matches!(ws_snap.backend, WorkspaceBackend::Local)
-                && validate_workspace_path(&ws_dir, self.config.general.allowed_root_dir.as_deref())
-                    .is_err()
+                && validate_against_roots(
+                    &ws_dir,
+                    self.config.general.allowed_root_dir.as_deref(),
+                    ws_snap.locked_root.as_deref(),
+                )
+                .is_err()
             {
                 continue;
             }
@@ -818,15 +822,20 @@ impl AgeMaxApp {
                 } else {
                     for pid in &pane_ids {
                         let pane_snap = tab_snap.panes.iter().find(|p| p.id == pid.0);
-                        let allowed_root = if matches!(ws_snap.backend, WorkspaceBackend::Local) {
-                            self.config.general.allowed_root_dir.as_deref()
-                        } else {
-                            None
-                        };
-                        let (p_dir, blocked_reason) = resolve_restored_pane_cwd(
+                        let (allowed_root, ws_locked_root) =
+                            if matches!(ws_snap.backend, WorkspaceBackend::Local) {
+                                (
+                                    self.config.general.allowed_root_dir.as_deref(),
+                                    ws_snap.locked_root.as_deref(),
+                                )
+                            } else {
+                                (None, None)
+                            };
+                        let (p_dir, blocked_reason) = resolve_restored_pane_cwd_with_roots(
                             pane_snap.map(|p| p.cwd.as_path()),
                             &ws_dir,
                             allowed_root,
+                            ws_locked_root,
                         );
                         if let Some(reason) = blocked_reason {
                             blocked_pane_warnings.push((WorkspaceId(ws_snap.id), *pid, reason));
@@ -891,6 +900,11 @@ impl AgeMaxApp {
                 },
                 listening_ports: Vec::new(),
                 profile_label: ws_snap.profile,
+                locked_root: if matches!(ws_snap.backend, WorkspaceBackend::Local) {
+                    ws_snap.locked_root
+                } else {
+                    None
+                },
                 backend: ws_snap.backend,
                 tabs,
                 active_tab_index,
@@ -955,8 +969,25 @@ impl AgeMaxApp {
             name,
             cwd,
             launch_agy,
+            lock_to_folder: false,
             backend: WorkspaceBackend::Local,
         })
+    }
+
+    /// Toggle `locked_root` on a single local workspace without affecting any other workspace (`REQ-093`).
+    fn toggle_workspace_lock(&mut self, idx: usize) {
+        let Some(ws) = self.workspaces.get_mut(idx) else {
+            return;
+        };
+        if !matches!(ws.backend, WorkspaceBackend::Local) {
+            return;
+        }
+        ws.locked_root = if ws.locked_root.is_some() {
+            None
+        } else {
+            Some(ws.cwd.clone())
+        };
+        self.save_session();
     }
 
     fn create_workspace_with_backend(
@@ -986,7 +1017,11 @@ impl AgeMaxApp {
         }
 
         let pane_id = PaneId::new();
-        let ws = Workspace::with_backend(req.name, req.cwd.clone(), pane_id, req.backend.clone());
+        let mut ws =
+            Workspace::with_backend(req.name, req.cwd.clone(), pane_id, req.backend.clone());
+        if matches!(req.backend, WorkspaceBackend::Local) && req.lock_to_folder {
+            ws.locked_root = Some(req.cwd.clone());
+        }
         // `git_branch` is populated asynchronously by `GitStatsPoller` to avoid blocking the UI thread.
 
         let surface = self
@@ -1328,6 +1363,7 @@ impl AgeMaxApp {
                     cwd: ws.cwd.clone(),
                     profile: ws.profile_label.clone(),
                     backend: ws.backend.clone(),
+                    locked_root: ws.locked_root.clone(),
                     active_tab_index: ws.active_tab_index,
                     tabs: tab_snapshots,
                 }
@@ -2503,6 +2539,9 @@ impl eframe::App for AgeMaxApp {
                 SidebarAction::CloseWorkspace(idx) => {
                     self.close_workspace(idx);
                 }
+                SidebarAction::ToggleWorkspaceLock(idx) => {
+                    self.toggle_workspace_lock(idx);
+                }
                 SidebarAction::ToggleCollapse => {
                     self.toggle_sidebar();
                 }
@@ -2631,25 +2670,26 @@ impl eframe::App for AgeMaxApp {
                         ToolbarAction::OpenViewSettings => {
                             self.settings_modal.open(&self.config);
                         }
-                        ToolbarAction::OpenSafetySettings => {
-                            self.settings_modal
-                                .open_tab(&self.config, SettingsTab::Safety);
+                        ToolbarAction::ToggleActiveWorkspaceLock => {
+                            self.toggle_workspace_lock(self.active_workspace_index);
                         }
                         ToolbarAction::SwitchUiMode(mode) => self.switch_ui_mode(mode),
                     }
                 }
 
                 if let Some(ws) = self.workspaces.get(self.active_workspace_index) {
-                    if let Some(ToolbarAction::OpenSafetySettings) = render_workspace_folder_bar(
-                        ui,
-                        &ws.cwd,
-                        &ws.backend,
-                        self.config.general.allowed_root_dir.as_deref(),
-                        self.config.general.enforce_agy_sandbox,
-                        &resolved_theme,
-                    ) {
-                        self.settings_modal
-                            .open_tab(&self.config, SettingsTab::Safety);
+                    if let Some(ToolbarAction::ToggleActiveWorkspaceLock) =
+                        render_workspace_folder_bar(
+                            ui,
+                            &ws.cwd,
+                            &ws.backend,
+                            ws.locked_root.as_deref(),
+                            self.config.general.allowed_root_dir.as_deref(),
+                            self.config.general.enforce_agy_sandbox,
+                            &resolved_theme,
+                        )
+                    {
+                        self.toggle_workspace_lock(self.active_workspace_index);
                     }
                 }
 
@@ -3888,20 +3928,73 @@ fn egui_key_to_code(key: Key) -> Option<KeyCode> {
     }
 }
 
+/// Validate `candidate` against both `global_allowed_root` and `ws_locked_root` (`REQ-092`).
+fn validate_against_roots(
+    candidate: &Path,
+    global_allowed_root: Option<&Path>,
+    ws_locked_root: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let mut resolved =
+        validate_workspace_path(candidate, global_allowed_root).map_err(|e| e.to_string())?;
+    if let Some(locked) = ws_locked_root {
+        resolved = validate_workspace_path(&resolved, Some(locked)).map_err(|e| e.to_string())?;
+    }
+    Ok(resolved)
+}
+
+/// Check whether a workspace's folder can be changed to `new_dir` (`REQ-092`).
+/// Locked workspaces block folder changes until unlocked first.
+#[cfg_attr(not(test), allow(dead_code))]
+fn can_change_workspace_folder(
+    new_dir: &Path,
+    global_allowed_root: Option<&Path>,
+    ws_locked_root: Option<&Path>,
+) -> Result<PathBuf, String> {
+    if let Some(locked) = ws_locked_root {
+        return Err(format!(
+            "Workspace is locked to {}. Unlock it first to change folders.",
+            locked.display()
+        ));
+    }
+    validate_workspace_path(new_dir, global_allowed_root).map_err(|e| e.to_string())
+}
+
+/// Validate an IPC path targeting an existing workspace (`REQ-092`).
+#[cfg_attr(not(test), allow(dead_code))]
+fn validate_ipc_path_for_existing_workspace(
+    target: &Path,
+    global_allowed_root: Option<&Path>,
+    ws_locked_root: Option<&Path>,
+) -> Result<PathBuf, String> {
+    validate_against_roots(target, global_allowed_root, ws_locked_root).map_err(|e| e.to_string())
+}
+
+/// Validate and resolve a restored pane's working directory against global and per-workspace roots (`REQ-090`, `REQ-092`).
+/// Falls back to `ws_dir` with a warning message if `pane_cwd` is outside either root.
+fn resolve_restored_pane_cwd_with_roots(
+    pane_cwd: Option<&Path>,
+    ws_dir: &Path,
+    global_allowed_root: Option<&Path>,
+    ws_locked_root: Option<&Path>,
+) -> (PathBuf, Option<String>) {
+    let Some(candidate) = pane_cwd.filter(|d| d.exists()) else {
+        return (ws_dir.to_path_buf(), None);
+    };
+    match validate_against_roots(candidate, global_allowed_root, ws_locked_root) {
+        Ok(safe_dir) => (safe_dir, None),
+        Err(err) => (ws_dir.to_path_buf(), Some(err.to_string())),
+    }
+}
+
 /// Validate and resolve a restored pane's working directory against `allowed_root` (`REQ-090`).
 /// Falls back to `ws_dir` with a warning message if `pane_cwd` is outside `allowed_root`.
+#[cfg(test)]
 fn resolve_restored_pane_cwd(
     pane_cwd: Option<&Path>,
     ws_dir: &Path,
     allowed_root: Option<&Path>,
 ) -> (PathBuf, Option<String>) {
-    let Some(candidate) = pane_cwd.filter(|d| d.exists()) else {
-        return (ws_dir.to_path_buf(), None);
-    };
-    match validate_workspace_path(candidate, allowed_root) {
-        Ok(safe_dir) => (safe_dir, None),
-        Err(err) => (ws_dir.to_path_buf(), Some(err.to_string())),
-    }
+    resolve_restored_pane_cwd_with_roots(pane_cwd, ws_dir, allowed_root, None)
 }
 
 #[cfg(test)]
@@ -3964,6 +4057,77 @@ mod tests {
             resolve_restored_pane_cwd(Some(&missing), &inside_ws, Some(&allowed_root));
         assert_eq!(resolved, inside_ws);
         assert!(blocked.is_none());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_restore_workspace_and_pane_locked_root_rejection() {
+        use super::{resolve_restored_pane_cwd_with_roots, validate_against_roots};
+
+        let base = std::env::temp_dir().join(format!("agemax_u14b_rest_{}", uuid::Uuid::new_v4()));
+        let ws_a = base.join("ws_a");
+        let ws_a_sub = ws_a.join("sub");
+        let ws_b = base.join("ws_b");
+        std::fs::create_dir_all(&ws_a_sub).expect("create ws_a_sub");
+        std::fs::create_dir_all(&ws_b).expect("create ws_b");
+
+        // Workspace A locked to ws_a (no global ceiling): ws_a_sub is valid, ws_b is rejected.
+        assert!(validate_against_roots(&ws_a, None, Some(&ws_a)).is_ok());
+        assert!(validate_against_roots(&ws_b, None, Some(&ws_a)).is_err());
+
+        // Pane inside ws_a_sub resolves cleanly; pane in ws_b falls back to ws_a with warning.
+        let (ok_dir, ok_warn) =
+            resolve_restored_pane_cwd_with_roots(Some(&ws_a_sub), &ws_a, None, Some(&ws_a));
+        assert_eq!(ok_dir, resolve_normalized_path(&ws_a_sub));
+        assert!(ok_warn.is_none());
+
+        let (rej_dir, rej_warn) =
+            resolve_restored_pane_cwd_with_roots(Some(&ws_b), &ws_a, None, Some(&ws_a));
+        assert_eq!(rej_dir, ws_a);
+        assert!(rej_warn.is_some());
+
+        // Global ceiling + per-workspace lock intersection: both must pass.
+        assert!(validate_against_roots(&ws_a_sub, Some(&ws_b), Some(&ws_a)).is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_locked_workspace_blocks_folder_change_until_unlocked() {
+        use super::can_change_workspace_folder;
+
+        let base = std::env::temp_dir().join(format!("agemax_u14b_chg_{}", uuid::Uuid::new_v4()));
+        let ws_a = base.join("ws_a");
+        let ws_b = base.join("ws_b");
+        std::fs::create_dir_all(&ws_a).expect("create ws_a");
+        std::fs::create_dir_all(&ws_b).expect("create ws_b");
+
+        // Locked workspace rejects changing folder to ws_b until unlocked.
+        assert!(can_change_workspace_folder(&ws_b, None, Some(&ws_a)).is_err());
+        // Once unlocked (locked_root = None), changing folder to ws_b is permitted.
+        assert!(can_change_workspace_folder(&ws_b, None, None).is_ok());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_ipc_respects_per_workspace_lock_without_affecting_other_workspaces() {
+        use super::{validate_against_roots, validate_ipc_path_for_existing_workspace};
+
+        let base = std::env::temp_dir().join(format!("agemax_u14b_ipc_{}", uuid::Uuid::new_v4()));
+        let ws_a = base.join("ws_a");
+        let ws_b = base.join("ws_b");
+        std::fs::create_dir_all(&ws_a).expect("create ws_a");
+        std::fs::create_dir_all(&ws_b).expect("create ws_b");
+
+        // Creating/activating Workspace B is NOT blocked by Workspace A's locked_root (only checked against global ceiling).
+        assert!(validate_against_roots(&ws_b, None, None).is_ok());
+
+        // Targeting locked Workspace A with an outside path (ws_b) is rejected.
+        assert!(validate_ipc_path_for_existing_workspace(&ws_b, None, Some(&ws_a)).is_err());
+        // Targeting Workspace A with its own folder is allowed.
+        assert!(validate_ipc_path_for_existing_workspace(&ws_a, None, Some(&ws_a)).is_ok());
 
         let _ = std::fs::remove_dir_all(&base);
     }

@@ -86,6 +86,8 @@ pub struct WorkspaceSnapshot {
     pub profile: Option<String>,
     #[serde(default)]
     pub backend: WorkspaceBackend,
+    #[serde(default)]
+    pub locked_root: Option<PathBuf>,
     pub active_tab_index: usize,
     pub tabs: Vec<TabSnapshot>,
 }
@@ -160,6 +162,7 @@ mod tests {
             cwd: PathBuf::from("C:\\Projects\\test"),
             profile: Some("default".to_string()),
             backend: WorkspaceBackend::Local,
+            locked_root: None,
             active_tab_index: 0,
             tabs: vec![tab],
         };

@@ -81,6 +81,8 @@ pub struct Workspace {
     pub profile_label: Option<String>,
     #[serde(default)]
     pub backend: WorkspaceBackend,
+    #[serde(default)]
+    pub locked_root: Option<PathBuf>,
     pub tabs: Vec<Tab>,
     pub active_tab_index: usize,
 }
@@ -105,6 +107,7 @@ impl Workspace {
             listening_ports: Vec::new(),
             profile_label: None,
             backend,
+            locked_root: None,
             tabs: vec![initial_tab],
             active_tab_index: 0,
         }

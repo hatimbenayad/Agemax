@@ -32,6 +32,7 @@ pub enum SidebarAction {
     CreateWorkspace,
     RenameWorkspace(usize),
     CloseWorkspace(usize),
+    ToggleWorkspaceLock(usize),
     ToggleCollapse,
     OpenViewSettings,
     OpenShortcuts,
@@ -126,7 +127,8 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
 
                         let dot_color = status_dot_color(meta.status, &tokens);
 
-                        card_frame.show(ui, |ui| {
+                        let card_resp = card_frame
+                            .show(ui, |ui| {
                             if props.is_collapsed {
                                 let first_letter =
                                     ws.name.chars().next().unwrap_or('W').to_string();
@@ -192,6 +194,17 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                                     }
                                     if name_resp.clicked() {
                                         action = Some(SidebarAction::SelectWorkspace(idx));
+                                    }
+
+                                    if ws.locked_root.is_some() {
+                                        ui.label(icon_rich(
+                                            UiIcon::Lock,
+                                            10.5,
+                                            Some(tokens.lock_fg),
+                                        ))
+                                        .on_hover_text(
+                                            "Locked to its folder (Age Max restore/IPC boundary only; does not confine agents or shells).",
+                                        );
                                     }
 
                                     if let Some(elapsed) = meta.working_elapsed_secs {
@@ -352,6 +365,32 @@ pub fn render_sidebar(ui: &mut egui::Ui, props: SidebarProps) -> Option<SidebarA
                                         .truncate(),
                                     );
                                 }
+                            }
+                        })
+                        .response;
+
+                        card_resp.context_menu(|ui| {
+                            if matches!(
+                                ws.backend,
+                                agemax_core::workspace::WorkspaceBackend::Local
+                            ) {
+                                let lock_label = if ws.locked_root.is_some() {
+                                    "Unlock Workspace"
+                                } else {
+                                    "Lock Workspace to Folder"
+                                };
+                                if ui.button(lock_label).clicked() {
+                                    action = Some(SidebarAction::ToggleWorkspaceLock(idx));
+                                    ui.close();
+                                }
+                            }
+                            if ui.button("Rename Workspace").clicked() {
+                                action = Some(SidebarAction::RenameWorkspace(idx));
+                                ui.close();
+                            }
+                            if props.workspaces.len() > 1 && ui.button("Close Workspace").clicked() {
+                                action = Some(SidebarAction::CloseWorkspace(idx));
+                                ui.close();
                             }
                         });
 

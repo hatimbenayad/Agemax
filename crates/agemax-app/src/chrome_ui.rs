@@ -32,7 +32,7 @@ pub enum ToolbarAction {
     OpenCommandPalette,
     ToggleNotifications,
     OpenViewSettings,
-    OpenSafetySettings,
+    ToggleActiveWorkspaceLock,
     SwitchUiMode(UiMode),
 }
 
@@ -66,6 +66,7 @@ pub struct NewWorkspaceRequest {
     pub name: String,
     pub cwd: PathBuf,
     pub launch_agy: bool,
+    pub lock_to_folder: bool,
     pub backend: WorkspaceBackend,
 }
 
@@ -77,6 +78,7 @@ pub struct NewWorkspaceModal {
     pub path_input: String,
     pub name_manually_edited: bool,
     pub launch_agy: bool,
+    pub lock_to_folder: bool,
     backend_tab: BackendTab,
     wsl_distro: String,
     wsl_linux_cwd: String,
@@ -105,6 +107,7 @@ impl NewWorkspaceModal {
             path_input: String::new(),
             name_manually_edited: false,
             launch_agy: false,
+            lock_to_folder: false,
             backend_tab: BackendTab::Local,
             wsl_distro: String::new(),
             wsl_linux_cwd: "~".to_string(),
@@ -135,6 +138,7 @@ impl NewWorkspaceModal {
             .unwrap_or_else(|| format!("Workspace {}", default_index));
         self.name_manually_edited = false;
         self.launch_agy = false;
+        self.lock_to_folder = false;
         self.detected_wsl_distros.clear();
         self.wsl_rx = None;
         self.wsl_detect_started = false;
@@ -244,7 +248,12 @@ impl NewWorkspaceModal {
             return None;
         }
 
-        let extra_h = if allowed_root.is_some() { 26.0 } else { 0.0 };
+        let extra_h = if allowed_root.is_some() { 26.0 } else { 0.0 }
+            + if self.backend_tab == BackendTab::Local {
+                40.0
+            } else {
+                0.0
+            };
         let modal_h = match self.backend_tab {
             BackendTab::Local => 268.0 + extra_h,
             BackendTab::Wsl => 300.0 + extra_h,
@@ -438,6 +447,22 @@ impl NewWorkspaceModal {
                         &mut self.launch_agy,
                         "Start Antigravity Agent (agy) inside this workspace immediately",
                     );
+                    if self.backend_tab == BackendTab::Local {
+                        ui.checkbox(
+                            &mut self.lock_to_folder,
+                            "Lock this workspace to its folder",
+                        )
+                        .on_hover_text(
+                            "Tells Age Max to only open, restore, and accept requests inside this folder. Does not confine AI agents or terminal shells on your filesystem.",
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                "Locks Age Max restore/IPC to this folder only (does not confine agents or shells).",
+                            )
+                            .size(10.5)
+                            .color(Color32::from_rgb(145, 155, 175)),
+                        );
+                    }
 
                     ui.add_space(10.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -489,6 +514,8 @@ impl NewWorkspaceModal {
                                 name: self.name.trim().to_string(),
                                 cwd,
                                 launch_agy: self.launch_agy,
+                                lock_to_folder: self.backend_tab == BackendTab::Local
+                                    && self.lock_to_folder,
                                 backend,
                             });
                             should_close = true;
@@ -1468,13 +1495,14 @@ fn hint_tooltip(response: egui::Response, show_hints: bool, hint: &str) -> egui:
     }
 }
 
-/// Render a clear working-directory & folder-lock status bar so users always see where terminals/agents run (`REQ-080`).
+/// Render a clear working-directory & per-workspace folder-lock status bar (`REQ-080`, `REQ-093`).
 pub fn render_workspace_folder_bar(
     ui: &mut egui::Ui,
     cwd: &Path,
     backend: &WorkspaceBackend,
-    allowed_root: Option<&Path>,
-    sandbox_enabled: bool,
+    ws_locked_root: Option<&Path>,
+    global_allowed_root: Option<&Path>,
+    _sandbox_enabled: bool,
     resolved_theme: &ResolvedTheme,
 ) -> Option<ToolbarAction> {
     let mut action = None;
@@ -1515,41 +1543,65 @@ pub fn render_workspace_folder_bar(
 
             ui.add_space(4.0);
 
-            let lock_btn = if let Some(root) = allowed_root {
-                let txt = if sandbox_enabled {
-                    "Locked inside folder • --sandbox"
-                } else {
-                    "Locked inside folder"
-                };
+            let folder_label = |p: &Path| -> String {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .filter(|s| !s.trim().is_empty())
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| display_clean_path(p))
+            };
+
+            let lock_btn = if let Some(root) = ws_locked_root {
+                let txt = format!("Locked to {}", folder_label(root));
                 ui.add(
-                    egui::Button::new(icon_label(UiIcon::Lock, txt, 11.0, Some(tokens.lock_fg)))
+                    egui::Button::new(icon_label(UiIcon::Lock, &txt, 11.0, Some(tokens.lock_fg)))
                         .fill(tokens.lock_fill)
                         .stroke(Stroke::new(1.0, tokens.lock_border))
                         .corner_radius(metrics::RADIUS_PILL)
                         .min_size(Vec2::new(0.0, 21.0)),
                 )
                 .on_hover_text(format!(
-                    "Safe Folder Lock active: {}\nClick to manage folder restrictions & --sandbox",
+                    "Locking this workspace tells Age Max to only open, restore, and accept requests for folders inside {}. It does not restrict what the AI agent or terminal shells running inside can read or write on your filesystem. Click to unlock.",
                     display_clean_path(root)
                 ))
-            } else {
-                let (ic, txt) = if sandbox_enabled {
-                    (UiIcon::Shield, "Sandbox On • Unrestricted")
-                } else {
-                    (UiIcon::LockOpen, "Unrestricted Folder (Click to Lock…)")
-                };
+            } else if let Some(ceiling) = global_allowed_root {
+                let txt = format!("Ceiling: {} (Click to Lock Workspace)", folder_label(ceiling));
                 ui.add(
-                    egui::Button::new(icon_label(ic, txt, 11.0, Some(tokens.unlocked_fg)))
-                        .fill(tokens.unlocked_fill)
-                        .stroke(Stroke::new(1.0, tokens.unlocked_border))
-                        .corner_radius(metrics::RADIUS_PILL)
-                        .min_size(Vec2::new(0.0, 21.0)),
+                    egui::Button::new(icon_label(
+                        UiIcon::Shield,
+                        &txt,
+                        11.0,
+                        Some(tokens.unlocked_fg),
+                    ))
+                    .fill(tokens.unlocked_fill)
+                    .stroke(Stroke::new(1.0, tokens.unlocked_border))
+                    .corner_radius(metrics::RADIUS_PILL)
+                    .min_size(Vec2::new(0.0, 21.0)),
                 )
-                .on_hover_text("Restrict where Age Max & agents can open workspaces")
+                .on_hover_text(format!(
+                    "App-Wide Safe Root Ceiling active: {}. Click to also lock this workspace to its own folder (does not confine agents or shells).",
+                    display_clean_path(ceiling)
+                ))
+            } else {
+                ui.add(
+                    egui::Button::new(icon_label(
+                        UiIcon::LockOpen,
+                        "Unlocked (Click to Lock)",
+                        11.0,
+                        Some(tokens.unlocked_fg),
+                    ))
+                    .fill(tokens.unlocked_fill)
+                    .stroke(Stroke::new(1.0, tokens.unlocked_border))
+                    .corner_radius(metrics::RADIUS_PILL)
+                    .min_size(Vec2::new(0.0, 21.0)),
+                )
+                .on_hover_text(
+                    "Click to lock this workspace to its folder. Locking tells Age Max where to open, restore, and accept requests; it does not confine AI agents or terminal shells on your filesystem.",
+                )
             };
 
             if lock_btn.clicked() {
-                action = Some(ToolbarAction::OpenSafetySettings);
+                action = Some(ToolbarAction::ToggleActiveWorkspaceLock);
             }
         });
     });
@@ -1679,5 +1731,19 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root_a);
         let _ = std::fs::remove_dir_all(&root_b);
+    }
+
+    #[test]
+    fn test_new_workspace_modal_lock_checkbox_defaults_false() {
+        let temp = std::env::temp_dir().join("agemax_test_modal_14b_lock");
+        let _ = std::fs::create_dir_all(&temp);
+
+        let mut modal = NewWorkspaceModal::new();
+        assert!(!modal.lock_to_folder);
+        modal.lock_to_folder = true;
+        modal.open(&temp, 1, None);
+        assert!(!modal.lock_to_folder);
+
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }

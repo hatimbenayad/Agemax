@@ -701,14 +701,14 @@ fn render_safety_tab(
     }
 
     ui.label(
-        egui::RichText::new("Restrict Workspaces to a Safe Folder")
+        egui::RichText::new("App-Wide Safe Root Ceiling (Optional)")
             .size(13.0)
             .color(Color32::WHITE)
             .strong(),
     );
     ui.label(
         egui::RichText::new(
-            "When set, Age Max blocks opening local workspaces, Explorer launches, session restores, and CLI/IPC commands outside this folder tree.",
+            "Optional global boundary across ALL workspaces. To lock a single workspace to its own folder without affecting others, use the Lock pill in the workspace's folder bar. Locking tells Age Max where to open, restore, and accept requests; it does not confine AI agents or terminal shells on your filesystem.",
         )
         .size(11.0)
         .color(Color32::from_rgb(165, 175, 195)),
@@ -717,14 +717,14 @@ fn render_safety_tab(
     if let Some(root) = &config.general.allowed_root_dir {
         ui.label(icon_label(
             UiIcon::Lock,
-            &format!("Active Lock: {}", display_clean_path(root)),
+            &format!("Global Ceiling: {}", display_clean_path(root)),
             11.5,
             Some(Color32::from_rgb(125, 225, 165)),
         ));
     } else {
         ui.label(icon_label(
             UiIcon::LockOpen,
-            "Currently unrestricted — workspaces can open in any folder.",
+            "No global ceiling — each workspace can still be locked individually.",
             11.5,
             Some(Color32::from_rgb(245, 190, 95)),
         ));
@@ -745,27 +745,28 @@ fn render_safety_tab(
                 .then(|| PathBuf::from(draft_allowed_root.trim()));
             *allowed_picker_rx = Some(spawn_folder_picker_async(initial, ctx.clone()));
         }
-        if ui.button("Apply Lock").clicked() {
+        if ui.button("Set Global Ceiling").clicked() {
             let trimmed = draft_allowed_root.trim();
             if trimmed.is_empty() {
                 config.general.allowed_root_dir = None;
-                *safety_status = Some(Ok("Cleared folder restriction.".to_string()));
+                *safety_status = Some(Ok("Cleared global ceiling.".to_string()));
                 changed = true;
             } else {
                 let path = PathBuf::from(trimmed);
                 if path.is_dir() {
                     config.general.allowed_root_dir = Some(path);
-                    *safety_status = Some(Ok(format!("Folder lock active: {trimmed}")));
+                    *safety_status = Some(Ok(format!("Global ceiling active: {trimmed}")));
                     changed = true;
                 } else {
                     *safety_status = Some(Err(format!("Folder does not exist: {trimmed}")));
                 }
             }
         }
-        if config.general.allowed_root_dir.is_some() && ui.button("Unlock").clicked() {
+        if config.general.allowed_root_dir.is_some() && ui.button("Clear Global Ceiling").clicked()
+        {
             config.general.allowed_root_dir = None;
             draft_allowed_root.clear();
-            *safety_status = Some(Ok("Folder lock removed.".to_string()));
+            *safety_status = Some(Ok("Global ceiling removed.".to_string()));
             changed = true;
         }
     });

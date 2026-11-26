@@ -32,6 +32,26 @@ fn test_workspace_backend_default_and_serde() {
     });
     let snap: WorkspaceSnapshot = serde_json::from_value(legacy_json).unwrap();
     assert_eq!(snap.backend, WorkspaceBackend::Local);
+    assert_eq!(snap.locked_root, None);
+    assert_eq!(agemax_core::session::SessionSnapshot::CURRENT_VERSION, 1);
+
+    let ws_local = Workspace::new("Locked", PathBuf::from("C:\\Projects\\A"), PaneId::new());
+    assert_eq!(ws_local.locked_root, None);
+
+    let locked_json = serde_json::json!({
+        "id": uuid::Uuid::new_v4(),
+        "name": "LockedSnap",
+        "cwd": "C:\\Projects\\A",
+        "profile": null,
+        "locked_root": "C:\\Projects\\A",
+        "active_tab_index": 0,
+        "tabs": []
+    });
+    let locked_snap: WorkspaceSnapshot = serde_json::from_value(locked_json).unwrap();
+    assert_eq!(
+        locked_snap.locked_root,
+        Some(PathBuf::from("C:\\Projects\\A"))
+    );
 }
 
 #[test]
